@@ -54,7 +54,8 @@ Deploy OpenCode on Railway with the pieces that matter in production: pinned fro
 | `OPENCODE_SESSION_SECRET` | `OPENCODE_SERVER_PASSWORD` | Signing secret for browser session cookies. Set this explicitly if you run multiple instances. |
 | `AUTH_REALM` | `opencode.tradao.xyz` | Basic Auth realm. Usually no need to change it. |
 | `ENABLE_OH_MY_OPENCODE` | `true` | Enable automatic injection of `oh-my-openagent@latest`. |
-| `ENABLE_OMO_DEFAULT_CONFIG` | `false` | When `true`, overwrite oh-my default config files from the bundled `oh-my-opencode.default.json`. |
+| `OMO_CONFIG_PROFILE` | - | Optional oh-my config profile. `default` loads `oh-my-opencode.default.json`; `team-a` loads `oh-my-opencode.team-a.json`; unset, `none`, `false`, or `off` leaves existing config untouched. |
+| `ENABLE_OMO_DEFAULT_CONFIG` | `false` | Legacy switch. When `true` and `OMO_CONFIG_PROFILE` is unset, behaves like `OMO_CONFIG_PROFILE=default`. |
 | `ENABLE_OPENCLAW_PLUGIN` | `false` | When `true`, inject `@laceletho/plugin-openclaw` into `/data/.config/opencode/opencode.json`. |
 | `ENABLE_OMO_REDEPLOY_REFRESH` | `true` | Refresh oh-my plugin cache when Railway deployment id changes. |
 | `ENABLE_MONITOR` | `false` | Enable the memory monitor and auto-restart logic. |
@@ -101,7 +102,9 @@ These solve different problems:
 
 - The template injects `oh-my-openagent@latest` into `/data/.config/opencode/opencode.json` by default.
 - Set `ENABLE_OPENCLAW_PLUGIN=true` if you also want to inject `@laceletho/plugin-openclaw`.
-- Set `ENABLE_OMO_DEFAULT_CONFIG=true` if you want startup to rebuild the oh-my config from the bundled template.
+- Set `OMO_CONFIG_PROFILE=default` if you want startup to rebuild the oh-my config from `oh-my-opencode.default.json`.
+- Add more bundled templates as `oh-my-opencode.<profile>.json`, then select one with `OMO_CONFIG_PROFILE=<profile>`.
+- Leave `OMO_CONFIG_PROFILE` unset, or set it to `none`, `false`, or `off`, to avoid overwriting existing oh-my config.
 - A new Railway deployment id triggers cache cleanup and re-download of the latest oh-my plugin.
 - Restarts within the same Railway deployment keep the plugin cache on purpose, so startup stays fast and repeatable.
 

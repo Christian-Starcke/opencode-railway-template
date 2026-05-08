@@ -7,6 +7,8 @@ const {
   OMO_PLUGIN,
   ensurePluginEntries,
   ensureRuntimeConfigs,
+  normalizeOmoConfigProfile,
+  resolveOmoTemplatePath,
 } = require("../runtime-config");
 
 const writeJson = (filePath, value) => {
@@ -49,6 +51,13 @@ const run = () => {
     [],
   );
 
+  assert.equal(normalizeOmoConfigProfile("team-a"), "team-a");
+  assert.equal(normalizeOmoConfigProfile(" none "), "");
+  assert.throws(
+    () => normalizeOmoConfigProfile("../secret"),
+    /Invalid OMO_CONFIG_PROFILE/,
+  );
+
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-runtime-config-"));
   const opencodeConfigPath = path.join(dir, "opencode.json");
   const omoConfigJsoncPath = path.join(dir, "oh-my-opencode.jsonc");
@@ -56,12 +65,24 @@ const run = () => {
   const omoCanonicalConfigJsoncPath = path.join(dir, "oh-my-openagent.jsonc");
   const omoCanonicalConfigPath = path.join(dir, "oh-my-openagent.json");
   const omoTemplatePath = path.join(dir, "oh-my-opencode.default.json");
+  const omoTeamTemplatePath = path.join(dir, "oh-my-opencode.team-a.json");
+
+  assert.equal(
+    resolveOmoTemplatePath({ omoTemplateDir: dir, omoConfigProfile: "team-a" }),
+    omoTeamTemplatePath,
+  );
+  assert.equal(resolveOmoTemplatePath({ omoTemplateDir: dir, omoConfigProfile: "off" }), "");
 
   writeJson(omoTemplatePath, {
     $schema: "https://example.com/schema.json",
     agents: {
       explore: { model: "kimi-for-coding/k2p5" },
       librarian: { model: "kimi-for-coding/k2p5" },
+    },
+  });
+  writeJson(omoTeamTemplatePath, {
+    agents: {
+      planner: { model: "openai/gpt-5.4" },
     },
   });
   writeJson(opencodeConfigPath, {
@@ -120,6 +141,38 @@ const run = () => {
       librarian: { model: "kimi-for-coding/k2p5" },
     },
   });
+
+  ensureRuntimeConfigs({
+    opencodeConfigPath,
+    omoConfigJsoncPath,
+    omoConfigPath,
+    omoCanonicalConfigJsoncPath,
+    omoCanonicalConfigPath,
+    omoTemplateDir: dir,
+    omoConfigProfile: "team-a",
+    enableOhMyOpencode: true,
+    enableOpenclawPlugin: false,
+  });
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(omoConfigPath, "utf8")), {
+    agents: {
+      planner: { model: "openai/gpt-5.4" },
+    },
+  });
+
+  assert.throws(
+    () => ensureRuntimeConfigs({
+      opencodeConfigPath,
+      omoConfigJsoncPath,
+      omoConfigPath,
+      omoCanonicalConfigJsoncPath,
+      omoCanonicalConfigPath,
+      omoTemplateDir: dir,
+      omoConfigProfile: "missing",
+      enableOhMyOpencode: true,
+    }),
+    /OMO config template not found/,
+  );
 
   writeJson(opencodeConfigPath, {
     plugin: ["oh-my-opencode@1.2.3", "@laceletho/plugin-openclaw"],

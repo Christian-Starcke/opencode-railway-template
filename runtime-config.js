@@ -10,7 +10,8 @@ const DEFAULT_OMO_CANONICAL_CONFIG_JSONC_PATH = "/data/.config/opencode/oh-my-op
 const DEFAULT_OMO_CANONICAL_CONFIG_PATH = "/data/.config/opencode/oh-my-openagent.json";
 const DEFAULT_OMO_CONFIG_JSONC_PATH = "/data/.config/opencode/oh-my-opencode.jsonc";
 const DEFAULT_OMO_CONFIG_PATH = "/data/.config/opencode/oh-my-opencode.json";
-const DEFAULT_OMO_TEMPLATE_PATH = path.join(__dirname, "oh-my-opencode.default.json");
+const OMO_TEMPLATE_PREFIX = "oh-my-opencode.";
+const OMO_TEMPLATE_SUFFIX = ".json";
 
 const readJson = (filePath, fallback) => {
   if (!fs.existsSync(filePath)) {
@@ -23,6 +24,39 @@ const readJson = (filePath, fallback) => {
 
 const writeJson = (filePath, value) => {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+};
+
+const normalizeOmoConfigProfile = (value) => {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  const profile = String(value).trim();
+  if (!profile || profile === "false" || profile === "none" || profile === "off") {
+    return "";
+  }
+
+  if (!/^[A-Za-z0-9_-]+$/.test(profile)) {
+    throw new Error(`Invalid OMO_CONFIG_PROFILE "${profile}". Use letters, numbers, "_" or "-".`);
+  }
+
+  return profile;
+};
+
+const resolveOmoTemplatePath = (opts = {}) => {
+  if (opts.omoTemplatePath) {
+    return opts.omoTemplatePath;
+  }
+
+  const profile = normalizeOmoConfigProfile(opts.omoConfigProfile);
+  if (!profile) {
+    return "";
+  }
+
+  return path.join(
+    opts.omoTemplateDir || __dirname,
+    `${OMO_TEMPLATE_PREFIX}${profile}${OMO_TEMPLATE_SUFFIX}`,
+  );
 };
 
 const isOhMyOpencodePlugin = (value) =>
@@ -84,10 +118,15 @@ const ensureRuntimeConfigs = (opts = {}) => {
   const omoConfigPath = opts.omoConfigPath || DEFAULT_OMO_CONFIG_PATH;
   const omoCanonicalConfigJsoncPath = opts.omoCanonicalConfigJsoncPath || DEFAULT_OMO_CANONICAL_CONFIG_JSONC_PATH;
   const omoCanonicalConfigPath = opts.omoCanonicalConfigPath || DEFAULT_OMO_CANONICAL_CONFIG_PATH;
-  const omoTemplatePath = opts.omoTemplatePath || DEFAULT_OMO_TEMPLATE_PATH;
   const enableOhMyOpencode = opts.enableOhMyOpencode !== false;
   const enableOpenclawPlugin = opts.enableOpenclawPlugin === true;
-  const enableOmoDefaultConfig = opts.enableOmoDefaultConfig === true;
+  const omoTemplatePath = resolveOmoTemplatePath({
+    omoTemplateDir: opts.omoTemplateDir,
+    omoTemplatePath: opts.omoTemplatePath,
+    omoConfigProfile: opts.enableOmoDefaultConfig === true && !opts.omoConfigProfile
+      ? "default"
+      : opts.omoConfigProfile,
+  });
 
   const opencodeConfig = readJson(opencodeConfigPath, {});
   if (opencodeConfig.plugins !== undefined) {
@@ -100,8 +139,12 @@ const ensureRuntimeConfigs = (opts = {}) => {
   );
   writeJson(opencodeConfigPath, opencodeConfig);
 
-  if (!enableOmoDefaultConfig) {
+  if (!omoTemplatePath) {
     return;
+  }
+
+  if (!fs.existsSync(omoTemplatePath)) {
+    throw new Error(`OMO config template not found: ${omoTemplatePath}`);
   }
 
   const defaults = readJson(omoTemplatePath, {});
@@ -125,6 +168,8 @@ module.exports = {
   OMO_LEGACY_PLUGIN_NAME,
   OMO_PLUGIN,
   OMO_PLUGIN_NAME,
+  normalizeOmoConfigProfile,
+  resolveOmoTemplatePath,
   ensurePluginEntries,
   ensureRuntimeConfigs,
 };
