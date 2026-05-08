@@ -1,0 +1,109 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/oh-my-opencode.schema.json",
+  "model_fallback": true,
+  "agents": {
+    "sisyphus": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "variant": "high",
+      "fallback_models": [
+        {
+          "model": "packyapi-codex/gpt-5.5"
+        },
+        {
+          "model": "opencode-go/glm-5"
+        }
+      ]
+    },
+    "hephaestus": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "oracle": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "multimodal-looker": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "prometheus": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "metis": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "momus": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "atlas": {
+      "model": "packyapi-codex/gpt-5.5",
+      "fallback_models": [
+        {
+          "model": "opencode-go/deepseek-v4-pro",
+          "variant": "max"
+        },
+        {
+          "model": "opencode-go/minimax-m2.7"
+        }
+      ]
+    },
+    "sisyphus-junior": {
+      "fallback_models": [
+        {
+          "model": "opencode-go/deepseek-v4-pro",
+          "variant": "high"
+        },
+        {
+          "model": "packyapi-codex/gpt-5.5"
+        },
+        {
+          "model": "opencode-go/minimax-m2.7"
+        }
+      ]
+    }
+  },
+  "categories": {
+    "visual-engineering": {
+      "model": "opencode-go/qwen3.6-plus",
+      "fallback_models": [
+        {
+          "model": "opencode-go/glm-5.1"
+        },
+        {
+          "model": "packyapi-codex/gpt-5.5"
+        }
+      ]
+    },
+    "ultrabrain": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "deep": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "artistry": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "quick": {
+      "model": "opencode-go/deepseek-v4-flash",
+      "variant": "high"
+    },
+    "unspecified-low": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "variant": "high"
+    },
+    "unspecified-high": {
+      "model": "packyapi-codex/gpt-5.5"
+    },
+    "writing": {
+      "fallback_models": [
+        {
+          "model": "opencode-go/qwen3.6-plus"
+        },
+        {
+          "model": "opencode-go/mimo-v2.5-pro",
+          "variant": "high"
+        },
+        {
+          "model": "packyapi-codex/gpt-5.5"
+        }
+      ]
+    }
+  }
+}
