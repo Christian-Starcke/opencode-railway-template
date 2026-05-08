@@ -55,7 +55,6 @@
 | `AUTH_REALM` | `opencode.tradao.xyz` | Basic Auth realm，通常无需修改。 |
 | `ENABLE_OH_MY_OPENCODE` | `true` | 是否自动注入 `oh-my-openagent@latest`。 |
 | `OMO_CONFIG_PROFILE` | - | 可选的 oh-my 配置 profile。`default` 加载 `oh-my-opencode.default.json`；`team-a` 加载 `oh-my-opencode.team-a.json`；不设置或设为 `none`、`false`、`off` 时不覆盖现有配置。 |
-| `ENABLE_OMO_DEFAULT_CONFIG` | `false` | 旧开关。为 `true` 且未设置 `OMO_CONFIG_PROFILE` 时，等价于 `OMO_CONFIG_PROFILE=default`。 |
 | `ENABLE_OPENCLAW_PLUGIN` | `false` | 为 `true` 时，向 `/data/.config/opencode/opencode.json` 注入 `@laceletho/plugin-openclaw`。 |
 | `ENABLE_OMO_REDEPLOY_REFRESH` | `true` | Railway deployment id 变化时是否刷新 oh-my 插件缓存。 |
 | `ENABLE_MONITOR` | `false` | 是否启用内存监控和自动重启。 |

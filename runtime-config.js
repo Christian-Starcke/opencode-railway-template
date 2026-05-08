@@ -123,9 +123,7 @@ const ensureRuntimeConfigs = (opts = {}) => {
   const omoTemplatePath = resolveOmoTemplatePath({
     omoTemplateDir: opts.omoTemplateDir,
     omoTemplatePath: opts.omoTemplatePath,
-    omoConfigProfile: opts.enableOmoDefaultConfig === true && !opts.omoConfigProfile
-      ? "default"
-      : opts.omoConfigProfile,
+    omoConfigProfile: opts.omoConfigProfile,
   });
 
   const opencodeConfig = readJson(opencodeConfigPath, {});

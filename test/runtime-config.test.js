@@ -107,7 +107,6 @@ const run = () => {
     omoTemplatePath,
     enableOhMyOpencode: true,
     enableOpenclawPlugin: true,
-    enableOmoDefaultConfig: true,
   });
 
   assert.deepEqual(JSON.parse(fs.readFileSync(opencodeConfigPath, "utf8")), {
@@ -187,7 +186,6 @@ const run = () => {
     omoTemplatePath,
     enableOhMyOpencode: false,
     enableOpenclawPlugin: false,
-    enableOmoDefaultConfig: false,
   });
 
   assert.deepEqual(JSON.parse(fs.readFileSync(opencodeConfigPath, "utf8")), {

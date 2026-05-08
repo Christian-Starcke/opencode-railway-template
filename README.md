@@ -55,7 +55,6 @@ Deploy OpenCode on Railway with the pieces that matter in production: pinned fro
 | `AUTH_REALM` | `opencode.tradao.xyz` | Basic Auth realm. Usually no need to change it. |
 | `ENABLE_OH_MY_OPENCODE` | `true` | Enable automatic injection of `oh-my-openagent@latest`. |
 | `OMO_CONFIG_PROFILE` | - | Optional oh-my config profile. `default` loads `oh-my-opencode.default.json`; `team-a` loads `oh-my-opencode.team-a.json`; unset, `none`, `false`, or `off` leaves existing config untouched. |
-| `ENABLE_OMO_DEFAULT_CONFIG` | `false` | Legacy switch. When `true` and `OMO_CONFIG_PROFILE` is unset, behaves like `OMO_CONFIG_PROFILE=default`. |
 | `ENABLE_OPENCLAW_PLUGIN` | `false` | When `true`, inject `@laceletho/plugin-openclaw` into `/data/.config/opencode/opencode.json`. |
 | `ENABLE_OMO_REDEPLOY_REFRESH` | `true` | Refresh oh-my plugin cache when Railway deployment id changes. |
 | `ENABLE_MONITOR` | `false` | Enable the memory monitor and auto-restart logic. |
