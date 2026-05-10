@@ -76,10 +76,6 @@ const refreshPluginCache = (opts = {}) => {
     return { action: "skipped", reason: "plugin_disabled" };
   }
 
-  if (env.ENABLE_OMO_REDEPLOY_REFRESH === "false") {
-    return { action: "skipped", reason: "refresh_disabled" };
-  }
-
   const deployment = getDeploymentId(env);
   const deploymentState = getDeploymentState(env);
   if (!deployment) {

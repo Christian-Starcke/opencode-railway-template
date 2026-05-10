@@ -84,13 +84,6 @@ const run = () => {
   });
   assert.deepEqual(skipped, { action: "skipped", reason: "missing_deployment_id" });
 
-  const disabled = refreshPluginCache({
-    cacheDir,
-    statePath,
-    env: { RAILWAY_DEPLOYMENT_ID: "dep-2", ENABLE_OMO_REDEPLOY_REFRESH: "false" },
-  });
-  assert.deepEqual(disabled, { action: "skipped", reason: "refresh_disabled" });
-
   const bin = path.join(dir, "bin");
   const fake = path.join(bin, "npm");
   const calls = path.join(dir, "npm-calls");

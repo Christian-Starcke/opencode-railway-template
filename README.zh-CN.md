@@ -56,7 +56,6 @@
 | `ENABLE_OH_MY_OPENCODE` | `true` | 是否自动注入 `oh-my-openagent@latest`。 |
 | `OMO_CONFIG_PROFILE` | - | 可选的 oh-my 配置 profile。`default` 加载 `oh-my-opencode.default.json`；`team-a` 加载 `oh-my-opencode.team-a.json`；不设置或设为 `none`、`false`、`off` 时不覆盖现有配置。 |
 | `ENABLE_OPENCLAW_PLUGIN` | `false` | 为 `true` 时，向 `/data/.config/opencode/opencode.json` 注入 `@laceletho/plugin-openclaw`。 |
-| `ENABLE_OMO_REDEPLOY_REFRESH` | `true` | Railway deployment id 变化时是否刷新 oh-my 插件缓存。 |
 | `ENABLE_MONITOR` | `false` | 是否启用内存监控和自动重启。 |
 | `LOG_LEVEL` | `WARN` | Wrapper 日志级别。 |
 | `LOG_SLEEP_BLOCKERS` | `true` | 记录哪些入站和出站请求让 Serverless 服务保持唤醒，方便排查。 |
