@@ -59,6 +59,8 @@ Deploy OpenCode on Railway with the pieces that matter in production: pinned fro
 | `ENABLE_MONITOR` | `false` | Enable the memory monitor and auto-restart logic. |
 | `LOG_LEVEL` | `WARN` | Wrapper log level. |
 | `LOG_SLEEP_BLOCKERS` | `false` | Log inbound and outbound requests that can keep a Serverless service awake. |
+| `PREPEND_PATH` | - | Extra PATH entries to inject before everything else. Useful for adding custom tool directories, e.g. `/data/.steel/bin:/data/.railway/bin`. |
+| `SKILLS_UPDATE_ON_START` | `true` | Run `npx skills update -g` on each deploy to refresh globally installed skills. Set to `false` to skip. |
 
 ## Monitor Environment Variables
 

@@ -59,6 +59,8 @@
 | `ENABLE_MONITOR` | `false` | 是否启用内存监控和自动重启。 |
 | `LOG_LEVEL` | `WARN` | Wrapper 日志级别。 |
 | `LOG_SLEEP_BLOCKERS` | `false` | 记录哪些入站和出站请求让 Serverless 服务保持唤醒，方便排查。 |
+| `PREPEND_PATH` | - | 额外注入到 PATH 前面的目录。用于添加自定义工具路径，如 `/data/.steel/bin:/data/.railway/bin`。 |
+| `SKILLS_UPDATE_ON_START` | `true` | 每次部署时运行 `npx skills update -g` 刷新全局安装的 skills。设为 `false` 跳过。 |
 
 ## 监控相关环境变量
 

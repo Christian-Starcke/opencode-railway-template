@@ -12,4 +12,11 @@ if [ -n "${PREPEND_PATH:-}" ]; then
   export PATH="${PREPEND_PATH}:${PATH}"
 fi
 
+# Update globally installed skills on each deploy (enabled by default)
+# Set SKILLS_UPDATE_ON_START=false to disable
+if [ "${SKILLS_UPDATE_ON_START:-true}" != "false" ]; then
+  echo "[skills] Updating global skills..."
+  npx skills update -g 2>&1 || echo "[skills] WARNING: Skills update failed, continuing anyway..."
+fi
+
 exec node /app/server.js
