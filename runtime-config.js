@@ -126,6 +126,14 @@ const ensureRuntimeConfigs = (opts = {}) => {
     omoConfigProfile: opts.omoConfigProfile,
   });
 
+  let omoTemplate = null;
+  if (omoTemplatePath) {
+    if (!fs.existsSync(omoTemplatePath)) {
+      throw new Error(`OMO config template not found: ${omoTemplatePath}`);
+    }
+    omoTemplate = readJson(omoTemplatePath, {});
+  }
+
   const opencodeConfig = readJson(opencodeConfigPath, {});
   if (opencodeConfig.plugins !== undefined) {
     delete opencodeConfig.plugins;
@@ -135,17 +143,16 @@ const ensureRuntimeConfigs = (opts = {}) => {
     enableOhMyOpencode,
     enableOpenclawPlugin,
   );
+  if (omoTemplate && omoTemplate.default_run_agent) {
+    opencodeConfig.default_agent = omoTemplate.default_run_agent;
+  }
   writeJson(opencodeConfigPath, opencodeConfig);
 
-  if (!omoTemplatePath) {
+  if (!omoTemplate) {
     return;
   }
 
-  if (!fs.existsSync(omoTemplatePath)) {
-    throw new Error(`OMO config template not found: ${omoTemplatePath}`);
-  }
-
-  const defaults = readJson(omoTemplatePath, {});
+  const defaults = omoTemplate;
   for (const filePath of [
     omoConfigJsoncPath,
     omoConfigPath,
