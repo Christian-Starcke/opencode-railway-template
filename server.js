@@ -1050,6 +1050,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (!isApiReq && !isPluginReq) {
+    if (sendStatic(res, staticPath("/"), req.method)) return;
+    res.writeHead(404, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+    res.end("Not found\n");
+    return;
+  }
+
   if (process.env.DEBUG_PROXY) {
     console.log(`[proxy] ${req.method} ${req.url}`);
   }
