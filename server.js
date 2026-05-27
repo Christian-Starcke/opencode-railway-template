@@ -923,6 +923,18 @@ async function handleLogin(req, res) {
   }
 }
 
+function extractRefererDirectory(referer) {
+  if (!referer) return;
+  try {
+    const u = new URL(referer);
+    return decodeRouteDirectory(u.pathname);
+  } catch {
+    return;
+  }
+}
+
+const QUESTION_PATH_RE = /^\/question\/[^/]+\/(reply|reject)$/;
+
 function proxyRequest(req, res, targetPort) {
   const forwardHeaders = { ...req.headers };
   delete forwardHeaders.authorization;
@@ -931,6 +943,13 @@ function proxyRequest(req, res, targetPort) {
   let proxyPath = req.url;
   if (proxyPath === '/events' || proxyPath.startsWith('/events?')) {
     proxyPath = proxyPath.replace('/events', '/global/event');
+  }
+
+  if (QUESTION_PATH_RE.test(pathnameOf(proxyPath)) && !forwardHeaders["x-opencode-directory"]) {
+    const dir = extractRefererDirectory(req.headers.referer);
+    if (dir && fs.existsSync(dir)) {
+      forwardHeaders["x-opencode-directory"] = dir;
+    }
   }
 
   const options = {

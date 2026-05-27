@@ -28,6 +28,10 @@ const run = () => {
   assert.doesNotMatch(server, /OPENCODE_API_PREFIXES/, "wrapper does not maintain OpenCode API route prefixes");
   assert.doesNotMatch(server, /isOpencodeApiEndpoint/, "OpenCode owns API route matching");
 
+  assert.match(server, /QUESTION_PATH_RE/, "question reply/reject path regex defined");
+  assert.match(server, /extractRefererDirectory/, "directory extraction from referer defined");
+  assert.match(server, /x-opencode-directory/, "x-opencode-directory header injected for question replies");
+
   console.log("auth routing ok");
 };
 
