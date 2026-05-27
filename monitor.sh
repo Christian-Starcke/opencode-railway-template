@@ -133,6 +133,30 @@ get_opencode_pid() {
     fi
 }
 
+# ==================== Check Active Sessions ====================
+# Queries OpenCode's internal /session/status API to detect busy/retry sessions.
+# SessionStatus is per-workspace (InstanceState keyed by directory), so we
+# iterate over all workspace directories to check for active sessions in any of
+# them. This catches long-running tasks (e.g. bash commands, shell loops,
+# external waits) that don't generate HTTP requests or log patterns tracked by
+# server.js.
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-/data/workspace}"
+check_session_active() {
+    local internal_port="${INTERNAL_PORT:-18080}"
+    local response
+
+    for dir in "$WORKSPACE_ROOT" "$WORKSPACE_ROOT"/*/; do
+        [ -d "$dir" ] || continue
+        response=$(curl -s -m 5 -H "x-opencode-directory: $dir" \
+            "http://127.0.0.1:${internal_port}/session/status" 2>/dev/null)
+        if [ -n "$response" ] && echo "$response" | grep -qE '"type"\s*:\s*"(busy|retry)"'; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # ==================== Get Memory Usage ====================
 get_memory_mb() {
     if [ -f /sys/fs/cgroup/memory.current ]; then
@@ -202,6 +226,12 @@ main() {
         uptime=$(($(date +%s) - start_time))
         local uptime_hours=$((uptime / 3600))
         
+        # Check real session state via OpenCode API — catches long-running
+        # tasks that don't trigger HTTP requests or specific log patterns
+        if check_session_active; then
+            date +%s > "$LAST_ACTIVITY_FILE"
+        fi
+
         if [ -f "$LAST_ACTIVITY_FILE" ]; then
             local last_activity
             last_activity=$(cat "$LAST_ACTIVITY_FILE")
