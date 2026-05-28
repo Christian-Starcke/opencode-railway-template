@@ -923,17 +923,55 @@ async function handleLogin(req, res) {
   }
 }
 
-function extractRefererDirectory(referer) {
-  if (!referer) return;
+function extractDirectoryFromURL(urlValue) {
+  if (!urlValue) return;
   try {
-    const u = new URL(referer);
+    const u = new URL(urlValue);
     return decodeRouteDirectory(u.pathname);
   } catch {
     return;
   }
 }
 
-const QUESTION_PATH_RE = /^\/question\/[^/]+\/(reply|reject)$/;
+const QUESTION_PATH_RE = /^\/question\/([^/]+)\/(reply|reject)$/;
+
+async function resolveQuestionDirectory(referer, origin, requestID) {
+  const fromHeader = extractDirectoryFromURL(referer) || extractDirectoryFromURL(origin);
+
+  if (fromHeader && fs.existsSync(fromHeader)) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/question?directory=${encodeURIComponent(fromHeader)}`);
+      if (res.ok) {
+        const questions = await res.json();
+        if (Array.isArray(questions) && questions.some((q) => q.id === requestID)) {
+          return fromHeader;
+        }
+      }
+    } catch {}
+  }
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/question?directory=${encodeURIComponent(WORKSPACE)}`);
+    if (res.ok) {
+      const questions = await res.json();
+      if (Array.isArray(questions) && questions.some((q) => q.id === requestID)) {
+        return WORKSPACE;
+      }
+    }
+  } catch {}
+
+  if (fromHeader && fs.existsSync(fromHeader)) return fromHeader;
+
+  console.error(
+    "[wrapper] question reply: cannot determine directory",
+    JSON.stringify({
+      requestID,
+      referer: compactLog(forwardedHeaderValue(referer), 200),
+      origin: compactLog(forwardedHeaderValue(origin), 200),
+      workspace: WORKSPACE,
+    }),
+  );
+}
 
 function proxyRequest(req, res, targetPort) {
   const forwardHeaders = { ...req.headers };
@@ -945,12 +983,22 @@ function proxyRequest(req, res, targetPort) {
     proxyPath = proxyPath.replace('/events', '/global/event');
   }
 
-  if (QUESTION_PATH_RE.test(pathnameOf(proxyPath)) && !forwardHeaders["x-opencode-directory"]) {
-    const dir = extractRefererDirectory(req.headers.referer);
-    if (dir && fs.existsSync(dir)) {
-      forwardHeaders["x-opencode-directory"] = dir;
-    }
+  const questionMatch = QUESTION_PATH_RE.exec(pathnameOf(proxyPath));
+  if (questionMatch && !forwardHeaders["x-opencode-directory"]) {
+    const requestID = questionMatch[1];
+    resolveQuestionDirectory(req.headers.referer, req.headers.origin, requestID)
+      .then((dir) => {
+        if (dir) forwardHeaders["x-opencode-directory"] = dir;
+      })
+      .catch(() => {})
+      .finally(() => sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort));
+    return;
   }
+
+  sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort);
+}
+
+function sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort) {
 
   const options = {
     hostname: "127.0.0.1",
