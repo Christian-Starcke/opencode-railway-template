@@ -178,6 +178,36 @@ get_memory_mb() {
     echo 0
 }
 
+# ==================== Activity File Helpers ====================
+touch_activity() {
+    local ts
+    ts=$(date +%s)
+    if [ -z "$ts" ] || [ "$ts" -le 0 ] 2>/dev/null; then
+        log "  ⚠️ Invalid timestamp from date, skipping activity update"
+        return 1
+    fi
+    printf '%s' "$ts" > "$LAST_ACTIVITY_FILE"
+}
+
+read_activity() {
+    if [ ! -f "$LAST_ACTIVITY_FILE" ]; then
+        touch_activity
+        cat "$LAST_ACTIVITY_FILE"
+        return
+    fi
+
+    local val
+    val=$(cat "$LAST_ACTIVITY_FILE" 2>/dev/null)
+    if [ -z "$val" ] || [ "$val" -le 0 ] 2>/dev/null; then
+        log "  ⚠️ Corrupted activity file (value='$val'), resetting to now"
+        touch_activity
+        cat "$LAST_ACTIVITY_FILE"
+        return
+    fi
+
+    echo "$val"
+}
+
 # ==================== Restart ====================
 restart_opencode() {
     local reason="$1"
@@ -207,7 +237,7 @@ main() {
     local check_count=0
     
     # Initialize activity timestamp
-    [ -f "$LAST_ACTIVITY_FILE" ] || date +%s > "$LAST_ACTIVITY_FILE"
+    read_activity > /dev/null
 
     log "🚀 Monitor started"
     
@@ -226,15 +256,14 @@ main() {
         uptime=$(($(date +%s) - start_time))
         local uptime_hours=$((uptime / 3600))
         
-        # Check real session state via OpenCode API — catches long-running
-        # tasks that don't trigger HTTP requests or specific log patterns
+        # Check real session state via OpenCode API
         if check_session_active; then
-            date +%s > "$LAST_ACTIVITY_FILE"
+            touch_activity
         fi
 
         if [ -f "$LAST_ACTIVITY_FILE" ]; then
             local last_activity
-            last_activity=$(cat "$LAST_ACTIVITY_FILE")
+            last_activity=$(read_activity)
             local current=$(date +%s)
             local idle_time=$(( (current - last_activity) / 60 ))
 

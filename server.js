@@ -651,10 +651,15 @@ function pathnameOf(url) {
 
 function touchActivity() {
   try {
-    fs.mkdirSync(path.dirname(ACTIVITY_FILE), { recursive: true });
-    fs.writeFileSync(ACTIVITY_FILE, String(Math.floor(Date.now() / 1000)));
+    const ts = Math.floor(Date.now() / 1000)
+    if (!Number.isFinite(ts) || ts <= 0) {
+      console.error("[wrapper] Invalid activity timestamp, skipping update")
+      return
+    }
+    fs.mkdirSync(path.dirname(ACTIVITY_FILE), { recursive: true })
+    fs.writeFileSync(ACTIVITY_FILE, String(ts))
   } catch (err) {
-    console.error(`[wrapper] Failed to update activity file: ${err.message}`);
+    console.error(`[wrapper] Failed to update activity file: ${err.message}`)
   }
 }
 
