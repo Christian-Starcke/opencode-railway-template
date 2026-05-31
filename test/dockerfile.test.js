@@ -36,6 +36,10 @@ const run = () => {
     );
   }
 
+  assert.match(dockerfile, /version="\$\(node -p "require\('\.\/packages\/opencode\/package\.json'\)\.version"\)"/);
+  assert.match(dockerfile, /OPENCODE_VERSION="\$\{version\}" OPENCODE_CHANNEL=latest bun run --cwd packages\/app build/);
+  assert.match(dockerfile, /OPENCODE_VERSION="\$\{version\}" OPENCODE_CHANNEL=latest bun run --cwd packages\/opencode build --single/);
+
   console.log("dockerfile copy ok");
 };
 
