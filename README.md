@@ -2,7 +2,7 @@
 
 [中文说明](./README.zh-CN.md)
 
-Deploy OpenCode on Railway with the pieces that matter in production: pinned frontend + backend from the same source ref, browser-friendly auth, idle high-memory auto-restart, and automatic plugin refresh.
+Deploy OpenCode on Railway with the pieces that matter in production: frontend + backend built from the same fork branch, browser-friendly auth, idle high-memory auto-restart, and automatic plugin refresh.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/opencode?referralCode=Se0h8C&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
@@ -10,8 +10,8 @@ Deploy OpenCode on Railway with the pieces that matter in production: pinned fro
 
 ## Why This Template
 
-1. **Build from source, keep web and core on the same version**
-   With `SOURCE_MODE=true`, the image clones `OPENCODE_REF` and builds both `packages/app` and `packages/opencode`. This avoids the common mismatch where a pinned backend is paired with the upstream hosted frontend.
+1. **Build from the Railway fork branch, keep web and core on the same version**
+   The image always clones `LaceLetho/opencode` branch `railway` and builds both `packages/app` and `packages/opencode`. This avoids the common mismatch where a pinned backend is paired with the upstream hosted frontend.
 
 2. **Built-in monitor for idle high-memory restart**
    `monitor.sh` checks idle time and memory usage. It only triggers a Railway restart / redeploy when the service has been idle long enough and memory is above the threshold, which keeps memory growth under control with minimal disruption.
@@ -48,8 +48,6 @@ Deploy OpenCode on Railway with the pieces that matter in production: pinned fro
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SOURCE_MODE` | `true` | Recommended. `true` builds from source and serves local web assets. `false` installs `opencode-ai@latest` and falls back to upstream hosted frontend behavior. |
-| `OPENCODE_REF` | `v1.14.25` | OpenCode git ref to build when `SOURCE_MODE=true`. |
 | `OPENCODE_MODEL` | - | Default model for OpenCode. |
 | `OPENCODE_SESSION_SECRET` | `OPENCODE_SERVER_PASSWORD` | Signing secret for browser session cookies. Set this explicitly if you run multiple instances. |
 | `AUTH_REALM` | `RAILWAY_PUBLIC_DOMAIN` or `opencode` | Basic Auth realm. Usually no need to change it. |

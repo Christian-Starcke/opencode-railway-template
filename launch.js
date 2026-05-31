@@ -1,6 +1,5 @@
 const fs = require("fs");
 const path = require("path");
-const { isSourceMode } = require("./source-mode");
 
 function canExec(file) {
   try {
@@ -9,13 +8,6 @@ function canExec(file) {
   } catch {
     return false;
   }
-}
-
-function resolvePath(name, env) {
-  const paths = (env.PATH ?? process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-  return paths
-    .map((dir) => path.join(dir, name))
-    .find(canExec);
 }
 
 function resolveCompiledLaunch(opts) {
@@ -40,7 +32,7 @@ function resolveCompiledLaunch(opts) {
     : undefined;
   if (!compiled) {
     return {
-      error: `No compiled OpenCode launcher found in ${compiledDir}. SOURCE_MODE=true requires a prebuilt standalone binary.`,
+      error: `No compiled OpenCode launcher found in ${compiledDir}. The image must build OpenCode from source first.`,
     };
   }
 
@@ -51,33 +43,8 @@ function resolveCompiledLaunch(opts) {
   };
 }
 
-function resolvePublishedLaunch(opts) {
-  const env = opts.env || process.env;
-  const cmd = resolvePath("opencode", env);
-  if (!cmd) {
-    return {
-      error: "No opencode executable found in PATH. SOURCE_MODE=false requires the published opencode-ai package to be installed.",
-    };
-  }
-
-  return {
-    cmd,
-    args: [
-      "--print-logs",
-      "--log-level",
-      opts.logLevel,
-      "serve",
-      "--port",
-      opts.internalPort,
-      "--hostname",
-      "127.0.0.1",
-    ],
-    mode: "published",
-  };
-}
-
 function resolveOpencodeLaunch(opts) {
-  return isSourceMode(opts.env) ? resolveCompiledLaunch(opts) : resolvePublishedLaunch(opts);
+  return resolveCompiledLaunch(opts);
 }
 
 module.exports = {

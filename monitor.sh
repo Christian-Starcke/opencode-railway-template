@@ -125,7 +125,7 @@ trigger_railway_redeploy() {
 get_opencode_pid() {
     local pid
 
-    # Both SOURCE_MODE variants launch OpenCode via `opencode serve`.
+    # OpenCode is always launched from the source-built binary via `opencode serve`.
     pid=$(ps -eo pid=,args= | awk '/(^|[[:space:]\/])opencode([[:space:]]|$)/ && / serve([[:space:]]|$)/ { print $1; exit }')
     if [ -n "$pid" ]; then
         echo "$pid"
