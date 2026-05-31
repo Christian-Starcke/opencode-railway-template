@@ -2,7 +2,7 @@
 
 [English](./README.md)
 
-部署到 Railway 的 OpenCode 模板，默认补齐生产环境真正需要的几件事：同版本前后端、浏览器友好的认证方式、空闲高内存自动重启，以及插件自动刷新。
+部署到 Railway 的 OpenCode 模板，默认补齐生产环境真正需要的几件事：基于同一个 fork 分支构建的同版本前后端、浏览器友好的认证方式、空闲高内存自动重启，以及插件自动刷新。
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/opencode?referralCode=Se0h8C&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
@@ -10,8 +10,8 @@
 
 ## 这个模板的特点
 
-1. **从源码构建，保证 Web 与 Core 版本一致**
-   `SOURCE_MODE=true` 时，镜像会基于 `OPENCODE_REF` 拉取 OpenCode 源码，并同时构建 `packages/app` 和 `packages/opencode`，避免本地 backend 搭配上游 hosted frontend 的“混版本”问题。
+1. **从 Railway fork 分支构建，保证 Web 与 Core 版本一致**
+   镜像始终拉取 `LaceLetho/opencode` 的 `railway` 分支，并同时构建 `packages/app` 和 `packages/opencode`，避免本地 backend 搭配上游 hosted frontend 的“混版本”问题。
 
 2. **内置监控脚本，空闲且高内存时自动重启**
    `monitor.sh` 会检查空闲时长和内存占用。只有在服务已空闲一段时间、且内存超过阈值时，才会触发 Railway restart / redeploy，用较低代价回收内存。
@@ -48,8 +48,6 @@
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SOURCE_MODE` | `true` | 推荐保留默认值。`true` 表示从源码构建并提供本地 Web 静态资源；`false` 表示安装 `opencode-ai@latest`，并回到上游 hosted frontend 行为。 |
-| `OPENCODE_REF` | `v1.14.25` | `SOURCE_MODE=true` 时要构建的 OpenCode git ref。 |
 | `OPENCODE_MODEL` | - | OpenCode 默认模型。 |
 | `OPENCODE_SESSION_SECRET` | `OPENCODE_SERVER_PASSWORD` | 浏览器 session cookie 的签名密钥。多实例部署时建议显式设置。 |
 | `AUTH_REALM` | `RAILWAY_PUBLIC_DOMAIN` 或 `opencode` | Basic Auth realm，通常无需修改。 |
