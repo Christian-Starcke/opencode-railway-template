@@ -19,9 +19,10 @@ RUN curl -fsSL https://bun.sh/install | bash \
   && bun --version \
   && git clone --branch railway --single-branch https://github.com/LaceLetho/opencode.git "${OPENCODE_SOURCE_DIR}" \
   && cd "${OPENCODE_SOURCE_DIR}" \
-  && bun install \
-  && bun run --cwd packages/app build \
-  && bun run --cwd packages/opencode build --single \
+  && version="$(node -p "require('./packages/opencode/package.json').version")" \
+  && OPENCODE_VERSION="${version}" OPENCODE_CHANNEL=latest bun install \
+  && OPENCODE_VERSION="${version}" OPENCODE_CHANNEL=latest bun run --cwd packages/app build \
+  && OPENCODE_VERSION="${version}" OPENCODE_CHANNEL=latest bun run --cwd packages/opencode build --single \
   && install -m 755 "$(find "${OPENCODE_SOURCE_DIR}/packages/opencode/dist" -type f -path "*/bin/opencode" | head -n 1)" /usr/local/bin/opencode
 
 WORKDIR /app
