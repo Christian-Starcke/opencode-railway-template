@@ -55,6 +55,8 @@
 | `OMO_CONFIG_PROFILE` | - | 可选的 oh-my 配置 profile。`default` 加载 `oh-my-opencode.default.json`；`team-a` 加载 `oh-my-opencode.team-a.json`；不设置或设为 `none`、`false`、`off` 时不覆盖现有配置。 |
 | `ENABLE_OPENCLAW_PLUGIN` | `false` | 为 `true` 时，向 `/data/.config/opencode/opencode.json` 注入 `@laceletho/plugin-openclaw`。 |
 | `ENABLE_MONITOR` | `false` | 是否启用内存监控和自动重启。 |
+| `OPENCODE_RAILWAY_SLEEP_MODE` | `true` | 启用 OpenCode 的 Railway sleep 友好模式：禁用 hosted UI 代理兜底、收紧 UI `connect-src`、页面隐藏时暂停事件流，并默认暂停远程 workspace 同步。 |
+| `OPENCODE_ENABLE_REMOTE_WORKSPACE_SYNC` | `false` | Railway sleep mode 开启时重新启用远程 workspace SSE 同步。此功能可能让服务保持唤醒。 |
 | `LOG_LEVEL` | `WARN` | Wrapper 日志级别。 |
 | `LOG_SLEEP_BLOCKERS` | `false` | 记录哪些入站和出站请求让 Serverless 服务保持唤醒，方便排查。 |
 | `PREPEND_PATH` | - | 额外注入到 PATH 前面的目录。用于添加自定义工具路径，如 `/data/.steel/bin:/data/.railway/bin`。 |

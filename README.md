@@ -55,6 +55,8 @@ Deploy OpenCode on Railway with the pieces that matter in production: frontend +
 | `OMO_CONFIG_PROFILE` | - | Optional oh-my config profile. `default` loads `oh-my-opencode.default.json`; `team-a` loads `oh-my-opencode.team-a.json`; unset, `none`, `false`, or `off` leaves existing config untouched. |
 | `ENABLE_OPENCLAW_PLUGIN` | `false` | When `true`, inject `@laceletho/plugin-openclaw` into `/data/.config/opencode/opencode.json`. |
 | `ENABLE_MONITOR` | `false` | Enable the memory monitor and auto-restart logic. |
+| `OPENCODE_RAILWAY_SLEEP_MODE` | `true` | Enable OpenCode's sleep-friendly Railway mode: no hosted UI proxy fallback, narrower UI `connect-src`, hidden-page event stream pause, and remote workspace sync pause by default. |
+| `OPENCODE_ENABLE_REMOTE_WORKSPACE_SYNC` | `false` | Re-enable remote workspace SSE sync when Railway sleep mode is on. This can keep the service awake. |
 | `LOG_LEVEL` | `WARN` | Wrapper log level. |
 | `LOG_SLEEP_BLOCKERS` | `false` | Log inbound and outbound requests that can keep a Serverless service awake. |
 | `PREPEND_PATH` | - | Extra PATH entries to inject before everything else. Useful for adding custom tool directories, e.g. `/data/.steel/bin:/data/.railway/bin`. |

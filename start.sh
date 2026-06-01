@@ -5,6 +5,9 @@ set -e
 # Actual monitor startup logic moved to server.js and runs after OpenCode is ready
 export ENABLE_MONITOR="${ENABLE_MONITOR:-false}"
 
+# Enable OpenCode's Railway sleep-friendly behavior by default.
+export OPENCODE_RAILWAY_SLEEP_MODE="${OPENCODE_RAILWAY_SLEEP_MODE:-true}"
+
 # Allow injecting extra PATH entries via Railway dashboard env var
 # Set PREPEND_PATH in Railway dashboard to e.g. /data/.steel/bin:/data/.railway/bin
 if [ -n "${PREPEND_PATH:-}" ]; then
