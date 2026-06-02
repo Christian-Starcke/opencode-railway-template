@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenCode Railway Smart Monitor - v5.0
+# OpenCode Railway Smart Monitor - v5.1
 # Detects real external activity via the wrapper instead of internal SSE bus noise.
 
 set -uo pipefail
@@ -10,6 +10,9 @@ CHECK_INTERVAL_SECONDS=${CHECK_INTERVAL_SECONDS:-60}
 MEMORY_THRESHOLD_MB=${MEMORY_THRESHOLD_MB:-2000}
 LOG_FILE="${LOG_FILE:-/tmp/opencode_monitor_script.log}"
 STATE_DIR="/tmp/opencode_monitor_state_v5"
+LOG_SLEEP_BLOCKERS=${LOG_SLEEP_BLOCKERS:-false}
+SLEEP_NET_LOG_IDLE_MINUTES=${SLEEP_NET_LOG_IDLE_MINUTES:-1}
+SLEEP_NET_LOG_MAX_LINES=${SLEEP_NET_LOG_MAX_LINES:-80}
 mkdir -p "$STATE_DIR"
 
 LAST_ACTIVITY_FILE="$STATE_DIR/last_activity"
@@ -28,7 +31,7 @@ log() {
 }
 
 echo "========================================"
-echo "🚂 OpenCode Railway Monitor v5.0"
+echo "🚂 OpenCode Railway Monitor v5.1"
 echo "========================================"
 
 get_current_deployment_id() {
@@ -130,6 +133,142 @@ get_opencode_pid() {
     if [ -n "$pid" ]; then
         echo "$pid"
         return
+    fi
+}
+
+state_name() {
+    case "$1" in
+        01) echo "ESTABLISHED" ;;
+        02) echo "SYN_SENT" ;;
+        03) echo "SYN_RECV" ;;
+        04) echo "FIN_WAIT1" ;;
+        05) echo "FIN_WAIT2" ;;
+        06) echo "TIME_WAIT" ;;
+        07) echo "CLOSE" ;;
+        08) echo "CLOSE_WAIT" ;;
+        09) echo "LAST_ACK" ;;
+        0A) echo "LISTEN" ;;
+        0B) echo "CLOSING" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+decode_ipv4() {
+    local hex="$1"
+    printf '%d.%d.%d.%d' \
+        "$((16#${hex:6:2}))" \
+        "$((16#${hex:4:2}))" \
+        "$((16#${hex:2:2}))" \
+        "$((16#${hex:0:2}))"
+}
+
+decode_endpoint() {
+    local value="$1"
+    local proto="$2"
+    local ip_hex="${value%:*}"
+    local port_hex="${value#*:}"
+    local port=$((16#$port_hex))
+
+    if [ "$proto" = "tcp" ]; then
+        echo "$(decode_ipv4 "$ip_hex"):$port"
+        return
+    fi
+
+    echo "[$ip_hex]:$port"
+}
+
+load_socket_owners() {
+    SOCKET_OWNER=()
+    SOCKET_CMD=()
+
+    local proc pid comm cmd fd target inode
+    for proc in /proc/[0-9]*; do
+        [ -d "$proc" ] || continue
+        pid="${proc##*/}"
+        comm=$(tr -d '\0' < "$proc/comm" 2>/dev/null || true)
+        cmd=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)
+        cmd="${cmd:0:160}"
+        cmd="${cmd//\"/_}"
+
+        for fd in "$proc"/fd/*; do
+            [ -e "$fd" ] || continue
+            target=$(readlink "$fd" 2>/dev/null || true)
+            case "$target" in
+                socket:\[*\])
+                    inode="${target#socket:[}"
+                    inode="${inode%]}"
+                    if [ -z "${SOCKET_OWNER[$inode]:-}" ]; then
+                        SOCKET_OWNER[$inode]="$pid/${comm:-unknown}"
+                        SOCKET_CMD[$inode]="$cmd"
+                    fi
+                    ;;
+            esac
+        done
+    done
+}
+
+log_tcp_file() {
+    local file="$1"
+    local proto="$2"
+    local max="$3"
+    local count_ref="$4"
+    local line sl local_addr remote_addr state inode local_ep remote_ep owner cmd state_text
+
+    [ -r "$file" ] || return
+
+    while read -r line; do
+        set -- $line
+        sl="${1:-}"
+        [ "$sl" = "sl" ] && continue
+
+        local_addr="${2:-}"
+        remote_addr="${3:-}"
+        state="${4:-}"
+        inode="${10:-}"
+
+        [ -n "$local_addr" ] || continue
+        [ -n "$remote_addr" ] || continue
+        [ -n "$inode" ] || continue
+        [ "$state" = "0A" ] && continue
+        [ "$remote_addr" = "00000000:0000" ] && continue
+        [ "$remote_addr" = "00000000000000000000000000000000:0000" ] && continue
+
+        if [ "${!count_ref}" -ge "$max" ]; then
+            return
+        fi
+
+        local_ep=$(decode_endpoint "$local_addr" "$proto")
+        remote_ep=$(decode_endpoint "$remote_addr" "$proto")
+        owner="${SOCKET_OWNER[$inode]:-unknown}"
+        cmd="${SOCKET_CMD[$inode]:--}"
+        state_text=$(state_name "$state")
+
+        log "[sleep-net] proto=$proto state=$state_text local=$local_ep remote=$remote_ep inode=$inode owner=$owner cmd=\"$cmd\""
+        printf -v "$count_ref" '%s' "$(( ${!count_ref} + 1 ))"
+    done < "$file"
+}
+
+log_tcp_snapshot() {
+    local idle_time="$1"
+    local current_mem="$2"
+    local pid="$3"
+
+    [ "$LOG_SLEEP_BLOCKERS" = "true" ] || return
+    [ "$idle_time" -ge "$SLEEP_NET_LOG_IDLE_MINUTES" ] || return
+
+    declare -gA SOCKET_OWNER
+    declare -gA SOCKET_CMD
+    load_socket_owners
+
+    local count=0
+    log "[sleep-net] snapshot idle=${idle_time}m memory=${current_mem}MB opencode_pid=${pid:-unknown} max_lines=$SLEEP_NET_LOG_MAX_LINES"
+    log_tcp_file /proc/net/tcp tcp "$SLEEP_NET_LOG_MAX_LINES" count
+    log_tcp_file /proc/net/tcp6 tcp6 "$SLEEP_NET_LOG_MAX_LINES" count
+    if [ "$count" -eq 0 ]; then
+        log "[sleep-net] no active non-listening tcp sockets"
+    fi
+    if [ "$count" -ge "$SLEEP_NET_LOG_MAX_LINES" ]; then
+        log "[sleep-net] truncated active tcp socket list at $SLEEP_NET_LOG_MAX_LINES lines"
     fi
 }
 
@@ -270,6 +409,8 @@ main() {
             if [ $((check_count % 10)) -eq 0 ]; then
                 log "ℹ️ Status: idle=${idle_time}m memory=${current_mem}MB uptime=${uptime_hours}h"
             fi
+
+            log_tcp_snapshot "$idle_time" "$current_mem" "$pid"
             
             if [ $idle_time -ge "$IDLE_TIME_MINUTES" ] && [ "$current_mem" -gt "$MEMORY_THRESHOLD_MB" ]; then
                 log "💤 Idle for ${idle_time} minutes with memory at ${current_mem}MB, restarting"

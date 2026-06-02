@@ -1153,9 +1153,20 @@ function startMonitor() {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    // Only write error-level logs to console; write all logs to file
+    let stdoutBuffer = "";
     monitor.stdout.on("data", (data) => {
-      logStream.write(data.toString());
+      const text = data.toString();
+      logStream.write(text);
+      if (!sleepDebug) return;
+
+      stdoutBuffer += text;
+      const lines = stdoutBuffer.split("\n");
+      stdoutBuffer = lines.pop() || "";
+      for (const line of lines) {
+        if (line.includes("[sleep-net]")) {
+          console.log("[monitor] " + line);
+        }
+      }
     });
     monitor.stderr.on("data", (data) => {
       const lines = data.toString().split("\n");

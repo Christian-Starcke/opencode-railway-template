@@ -72,6 +72,8 @@ These matter only when `ENABLE_MONITOR=true`.
 | `IDLE_TIME_MINUTES` | `10` | Required idle time before restart is allowed. |
 | `MEMORY_THRESHOLD_MB` | `2000` | Restart only when memory is above this threshold. |
 | `CHECK_INTERVAL_SECONDS` | `60` | Monitor check interval. |
+| `SLEEP_NET_LOG_IDLE_MINUTES` | `1` | When `LOG_SLEEP_BLOCKERS=true`, start logging TCP socket snapshots after this many idle minutes. |
+| `SLEEP_NET_LOG_MAX_LINES` | `80` | Maximum active TCP socket lines to log per monitor snapshot. |
 
 Railway injects `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, and `RAILWAY_SERVICE_ID` automatically.
 
