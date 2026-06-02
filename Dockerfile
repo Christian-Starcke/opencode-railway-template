@@ -15,9 +15,12 @@ RUN apt-get update \
     procps \
   && rm -rf /var/lib/apt/lists/*
 
+ARG OPENCODE_SOURCE_CACHE_BUST=20260602T113843Z
 RUN curl -fsSL https://bun.sh/install | bash \
   && bun --version \
+  && echo "opencode source cache bust: ${OPENCODE_SOURCE_CACHE_BUST}" \
   && git clone --branch railway --single-branch https://github.com/LaceLetho/opencode.git "${OPENCODE_SOURCE_DIR}" \
+  && cd "${OPENCODE_SOURCE_DIR}" && git fetch origin railway && git reset --hard origin/railway \
   && cd "${OPENCODE_SOURCE_DIR}" \
   && version="$(node -p "require('./packages/opencode/package.json').version")" \
   && OPENCODE_VERSION="${version}" OPENCODE_CHANNEL=latest bun install \
