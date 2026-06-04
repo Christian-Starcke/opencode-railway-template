@@ -14,7 +14,7 @@
    镜像始终拉取 `LaceLetho/opencode` 的 `railway` 分支，并同时构建 `packages/app` 和 `packages/opencode`，避免本地 backend 搭配上游 hosted frontend 的“混版本”问题。
 
 2. **内置监控脚本，空闲且高内存时自动重启**
-   `monitor.sh` 会检查空闲时长和内存占用。只有在服务已空闲一段时间、且内存超过阈值时，才会触发 Railway restart / redeploy，用较低代价回收内存。
+   `monitor.sh` 会检查空闲时长和内存压力。只有在服务已空闲一段时间、且非缓存内存超过阈值时，才会触发 Railway restart / redeploy，避免仅因为 Linux 用空闲内存做文件缓存而重启。
 
 3. **支持 sleeping 模式，进一步降低成本**
    `railway.toml` 默认启用了 `serverless = true`。服务长时间无请求时可以休眠，新的请求到来后再由 Railway 拉起。
@@ -70,7 +70,7 @@
 | --- | --- | --- |
 | `RAILWAY_API_TOKEN` | - | 监控脚本真正触发 Railway restart / redeploy 所需的 token。 |
 | `IDLE_TIME_MINUTES` | `10` | 允许触发重启前所需的空闲时长。 |
-| `MEMORY_THRESHOLD_MB` | `2000` | 只有内存高于该阈值时才会触发重启。 |
+| `MEMORY_THRESHOLD_MB` | `2000` | 只有 pressure memory 高于该阈值时才会触发重启。在 cgroup v2 中该值为 `anon + kernel`，git/build/test 活动产生的可回收文件缓存会记录到日志，但不会用于重启判断。 |
 | `CHECK_INTERVAL_SECONDS` | `60` | 监控检查周期。 |
 
 `RAILWAY_PROJECT_ID`、`RAILWAY_ENVIRONMENT_ID`、`RAILWAY_SERVICE_ID` 会由 Railway 自动注入。
@@ -91,7 +91,7 @@ opencode attach https://your-app.up.railway.app/ -p YOUR_PASSWORD
 
 - Railway Serverless 默认开启，空闲服务可自动休眠。
 - `server.js` 会记录常见唤醒来源，方便排查为什么服务没有进入 sleep。
-- 配合 `ENABLE_MONITOR=true` 后，还可以在“长期空闲 + 内存过高”时自动触发一次重启，降低内存占用。
+- 配合 `ENABLE_MONITOR=true` 后，还可以在“长期空闲 + 非缓存内存过高”时自动触发一次重启，降低内存占用。
 
 这两层机制分别解决不同问题：
 

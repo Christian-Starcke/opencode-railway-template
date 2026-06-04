@@ -14,7 +14,7 @@ Deploy OpenCode on Railway with the pieces that matter in production: frontend +
    The image always clones `LaceLetho/opencode` branch `railway` and builds both `packages/app` and `packages/opencode`. This avoids the common mismatch where a pinned backend is paired with the upstream hosted frontend.
 
 2. **Built-in monitor for idle high-memory restart**
-   `monitor.sh` checks idle time and memory usage. It only triggers a Railway restart / redeploy when the service has been idle long enough and memory is above the threshold, which keeps memory growth under control with minimal disruption.
+   `monitor.sh` checks idle time and memory pressure. It only triggers a Railway restart / redeploy when the service has been idle long enough and non-cache memory is above the threshold, which keeps memory growth under control without restarting just because Linux is using spare RAM for file cache.
 
 3. **Serverless sleep for lower cost**
    `railway.toml` enables `serverless = true` by default. When the service is unused, it can sleep and reduce cost; when traffic returns, Railway wakes it up again.
@@ -70,7 +70,7 @@ These matter only when `ENABLE_MONITOR=true`.
 | --- | --- | --- |
 | `RAILWAY_API_TOKEN` | - | Needed if the monitor should actually trigger Railway restart / redeploy. |
 | `IDLE_TIME_MINUTES` | `10` | Required idle time before restart is allowed. |
-| `MEMORY_THRESHOLD_MB` | `2000` | Restart only when memory is above this threshold. |
+| `MEMORY_THRESHOLD_MB` | `2000` | Restart only when pressure memory is above this threshold. On cgroup v2 this is `anon + kernel`, so reclaimable file cache from git/build/test activity is logged but ignored for restart decisions. |
 | `CHECK_INTERVAL_SECONDS` | `60` | Monitor check interval. |
 | `SLEEP_NET_LOG_IDLE_MINUTES` | `1` | When `LOG_SLEEP_BLOCKERS=true`, start logging TCP socket snapshots after this many idle minutes. |
 | `SLEEP_NET_LOG_MAX_LINES` | `80` | Maximum active TCP socket lines to log per monitor snapshot. |
@@ -93,7 +93,7 @@ opencode attach https://your-app.up.railway.app/ -p YOUR_PASSWORD
 
 - Railway Serverless is enabled by default, so idle services can sleep.
 - `server.js` logs common wake-up sources to help debug why a service stays active.
-- With `ENABLE_MONITOR=true`, the service can also auto-restart when it stays idle and memory usage becomes too high.
+- With `ENABLE_MONITOR=true`, the service can also auto-restart when it stays idle and non-cache memory usage becomes too high.
 
 These solve different problems:
 

@@ -250,8 +250,10 @@ log_tcp_file() {
 
 log_tcp_snapshot() {
     local idle_time="$1"
-    local current_mem="$2"
-    local pid="$3"
+    local pressure_mem="$2"
+    local total_mem="$3"
+    local cache_mem="$4"
+    local pid="$5"
 
     [ "$LOG_SLEEP_BLOCKERS" = "true" ] || return
     [ "$idle_time" -ge "$SLEEP_NET_LOG_IDLE_MINUTES" ] || return
@@ -261,7 +263,7 @@ log_tcp_snapshot() {
     load_socket_owners
 
     local count=0
-    log "[sleep-net] snapshot idle=${idle_time}m memory=${current_mem}MB opencode_pid=${pid:-unknown} max_lines=$SLEEP_NET_LOG_MAX_LINES"
+    log "[sleep-net] snapshot idle=${idle_time}m pressure_memory=${pressure_mem}MB total_memory=${total_mem}MB file_cache=${cache_mem}MB opencode_pid=${pid:-unknown} max_lines=$SLEEP_NET_LOG_MAX_LINES"
     log_tcp_file /proc/net/tcp tcp "$SLEEP_NET_LOG_MAX_LINES" count
     log_tcp_file /proc/net/tcp6 tcp6 "$SLEEP_NET_LOG_MAX_LINES" count
     if [ "$count" -eq 0 ]; then
@@ -297,7 +299,14 @@ check_session_active() {
 }
 
 # ==================== Get Memory Usage ====================
-get_memory_mb() {
+get_cgroup_stat_bytes() {
+    local key="$1"
+
+    [ -f /sys/fs/cgroup/memory.stat ] || return 1
+    awk -v key="$key" '$1 == key { print $2; found = 1; exit } END { if (!found) exit 1 }' /sys/fs/cgroup/memory.stat 2>/dev/null
+}
+
+get_total_memory_mb() {
     if [ -f /sys/fs/cgroup/memory.current ]; then
         local total_bytes
         total_bytes=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0)
@@ -315,6 +324,30 @@ get_memory_mb() {
     fi
 
     echo 0
+}
+
+get_pressure_memory_mb() {
+    local anon_bytes kernel_bytes
+
+    anon_bytes=$(get_cgroup_stat_bytes anon || echo 0)
+    kernel_bytes=$(get_cgroup_stat_bytes kernel || echo 0)
+    if [ "$anon_bytes" -gt 0 ] || [ "$kernel_bytes" -gt 0 ]; then
+        echo $(((anon_bytes + kernel_bytes) / 1024 / 1024))
+        return
+    fi
+
+    get_total_memory_mb
+}
+
+get_file_cache_mb() {
+    local file_bytes
+
+    file_bytes=$(get_cgroup_stat_bytes file || echo 0)
+    echo $((file_bytes / 1024 / 1024))
+}
+
+get_memory_mb() {
+    get_pressure_memory_mb
 }
 
 # ==================== Activity File Helpers ====================
@@ -389,8 +422,10 @@ main() {
             continue
         fi
         
-        local current_mem
-        current_mem=$(get_memory_mb)
+        local pressure_mem total_mem cache_mem
+        pressure_mem=$(get_pressure_memory_mb)
+        total_mem=$(get_total_memory_mb)
+        cache_mem=$(get_file_cache_mb)
         local uptime
         uptime=$(($(date +%s) - start_time))
         local uptime_hours=$((uptime / 3600))
@@ -407,14 +442,14 @@ main() {
             local idle_time=$(( (current - last_activity) / 60 ))
 
             if [ $((check_count % 10)) -eq 0 ]; then
-                log "ℹ️ Status: idle=${idle_time}m memory=${current_mem}MB uptime=${uptime_hours}h"
+                log "ℹ️ Status: idle=${idle_time}m pressure_memory=${pressure_mem}MB total_memory=${total_mem}MB file_cache=${cache_mem}MB uptime=${uptime_hours}h"
             fi
 
-            log_tcp_snapshot "$idle_time" "$current_mem" "$pid"
+            log_tcp_snapshot "$idle_time" "$pressure_mem" "$total_mem" "$cache_mem" "$pid"
             
-            if [ $idle_time -ge "$IDLE_TIME_MINUTES" ] && [ "$current_mem" -gt "$MEMORY_THRESHOLD_MB" ]; then
-                log "💤 Idle for ${idle_time} minutes with memory at ${current_mem}MB, restarting"
-                restart_opencode "idle with high memory"
+            if [ $idle_time -ge "$IDLE_TIME_MINUTES" ] && [ "$pressure_mem" -gt "$MEMORY_THRESHOLD_MB" ]; then
+                log "💤 Idle for ${idle_time} minutes with pressure memory at ${pressure_mem}MB (total=${total_mem}MB file_cache=${cache_mem}MB), restarting"
+                restart_opencode "idle with high pressure memory"
             fi
         fi
         
