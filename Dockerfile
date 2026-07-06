@@ -44,9 +44,9 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 
-# Copy start script, server wrapper, runtime config helpers, oh-my templates, and monitor script
-COPY start.sh server.js plugin-refresh.js runtime-config.js oh-my-opencode*.json launch.js source-mode.js ws-proxy.js monitor.sh ./
-RUN chmod +x monitor.sh
+# Copy start script, server wrapper, runtime config helpers, oh-my templates, monitor, and workspace sync script
+COPY start.sh server.js plugin-refresh.js runtime-config.js oh-my-opencode*.json launch.js source-mode.js ws-proxy.js monitor.sh prism-sync.sh ./
+RUN chmod +x monitor.sh prism-sync.sh
 
 # Railway injects PORT at runtime
 EXPOSE 8080
