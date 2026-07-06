@@ -19,4 +19,10 @@ if [ "${SKILLS_UPDATE_ON_START:-true}" != "false" ]; then
   npx skills update -g 2>&1 || echo "[skills] WARNING: Skills update failed, continuing anyway..."
 fi
 
+# Sync workspace repos — pull latest from all git repos under the workspace
+# Runs on every start/deploy. Skips silently if prism-sync.sh isn't present.
+if [ -x /app/prism-sync.sh ]; then
+  /app/prism-sync.sh 2>&1 || echo "[prism-sync] WARNING: Sync failed, continuing anyway..."
+fi
+
 exec node /app/server.js
