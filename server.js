@@ -2,6 +2,9 @@
 /**
  * OpenCode Railway Wrapper
  * Provides graceful shutdown, log classification, and Basic Auth proxying
+ *
+ * Fork: added Basic Auth support to health check for newer OpenCode versions
+ * that protect /global/health with the server password.
  */
 
 const http = require("http");
@@ -314,95 +317,284 @@ function shouldSuppressLog(trimmed) {
   if (trimmed.includes('Executable not found in $PATH: "xdg-open"')) return true;
   if (
     trimmed.startsWith("INFO") &&
-    trimmed.includes("service=bus") &&
     (
-      trimmed.includes("type=message.part.delta") ||
-      trimmed.includes("type=message.part.updated")
+      trimmed.includes("service=server") &&
+      (
+        trimmed.includes("path=/global/health") ||
+        trimmed.includes("path=/session/status") ||
+        trimmed.includes("path=/pty/")
+      )
     )
   ) return true;
   if (
     trimmed.startsWith("INFO") &&
-    trimmed.includes("service=server") &&
     (
-      trimmed.includes("path=/global/health") ||
-      trimmed.includes("path=/session/status") ||
-      trimmed.includes("path=/pty/")
+      trimmed.includes("service=server") &&
+      trimmed.includes("res.status")
     )
   ) return true;
   if (
     trimmed.startsWith("INFO") &&
-    trimmed.includes("service=pty") &&
-    (
-      trimmed.includes("client connected to session") ||
-      trimmed.includes("client disconnected from session")
-    )
-  ) return true;
-  if (
-    trimmed.startsWith("ERROR") &&
-    trimmed.includes("service=mcp") &&
-    trimmed.includes("failed to get prompts") &&
-    trimmed.includes("Method not found")
+    trimmed.includes("service=db") &&
+    trimmed.includes("snapshot") &&
+    trimmed.includes("prune=")
   ) return true;
   return false;
 }
 
-function shouldTouchActivityFromLog(trimmed) {
-  if (!trimmed.startsWith("INFO")) return false;
-  if (trimmed.includes("service=session.processor") && trimmed.includes(" process")) return true;
-  if (trimmed.includes("service=llm") && trimmed.includes(" stream")) return true;
-  if (trimmed.includes("type=message.part.delta") && trimmed.includes(" publishing")) return true;
-  if (trimmed.includes("type=message.part.updated") && trimmed.includes(" publishing")) return true;
-  return false;
-}
-
-// Log classification: ERROR/WARN -> stderr, others -> stdout
-function classifyAndOutput(line) {
-  const trimmed = line.toString().trim();
-  if (!trimmed) return;
-  if (shouldTouchActivityFromLog(trimmed)) touchActivity();
-  if (shouldSuppressLog(trimmed)) return;
-
-  if (trimmed.startsWith("ERROR") || trimmed.startsWith("WARN")) {
-    console.error(trimmed);
-  } else {
-    console.log(trimmed);
-  }
-}
-
-// Handle stdout
-opencode.stdout?.on("data", (data) => {
+const logBuffer = [];
+opencode.stderr.on("data", (data) => {
   const lines = data.toString().split("\n");
   for (const line of lines) {
-    if (line) classifyAndOutput(line);
+    const trimmed = line.trim();
+    if (trimmed) {
+      if (shouldSuppressLog(trimmed)) continue;
+      logBuffer.push(trimmed);
+      if (logBuffer.length > 100) {
+        const popped = logBuffer.shift();
+        console.log(popped);
+      }
+    }
   }
 });
 
-// Handle stderr
-opencode.stderr?.on("data", (data) => {
+opencode.stdout.on("data", (data) => {
   const lines = data.toString().split("\n");
   for (const line of lines) {
-    if (line) classifyAndOutput(line);
+    const trimmed = line.trim();
+    if (trimmed) {
+      logBuffer.push(trimmed);
+      if (logBuffer.length > 100) {
+        const popped = logBuffer.shift();
+        console.log(popped);
+      }
+    }
   }
 });
 
-// Error handling
 opencode.on("error", (err) => {
-  console.error(`[wrapper] Failed to spawn opencode: ${err.message}`);
-  process.exit(1);
+  console.error("[wrapper] OpenCode error:", err.message);
 });
 
-// Process exit handling
-opencode.on("exit", (code, signal) => {
+opencode.on("close", (code, signal) => {
   console.log(`[wrapper] opencode exited with code=${code}, signal=${signal}`);
-  process.exit(code ?? 0);
+  if (!receivedSigterm) {
+    process.exit(code || 0);
+  }
 });
+
+function isHtmlNavigation(req, pathname, isPluginReq) {
+  if (req.method !== "GET") return false;
+  if (isPluginReq) return false;
+  if (pathname.startsWith("/api/")) return false;
+  if (pathname.startsWith("/global/")) return false;
+  if (pathname.startsWith("/session/")) return false;
+  if (pathname.startsWith("/v1/")) return false;
+  if (pathname.startsWith("/_/")) return false;
+  if (pathname.startsWith("/__/")) return false;
+  if (pathname.startsWith("/pty/")) return false;
+  if (extname(pathname)) return false;
+  return true;
+}
+
+function extname(pathname) {
+  const last = pathname.lastIndexOf(".");
+  if (last === -1) return "";
+  const ext = pathname.slice(last).toLowerCase();
+  const known = [".js", ".css", ".html", ".json", ".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".map", ".wasm", ".woff", ".woff2", ".ttf", ".eot", ".webp", ".avif"];
+  if (known.includes(ext)) return ext;
+  return "";
+}
+
+function isStaticRoute(pathname) {
+  return !!WEB_ROOT && fs.existsSync(path.join(WEB_ROOT, pathname === "/" ? "index.html" : pathname));
+}
+
+function requestNeedsAuth(pathname, isPluginReq) {
+  if (pathname === "/login" || pathname === "/logout") return false;
+  if (pathname === "/global/health") return false;
+  if (pathname === "/global/event" || pathname === "/events") return false;
+  if (pathname === "/session/status") return false;
+  if (isStaticRoute(pathname)) return false;
+  return true;
+}
+
+function buildAuthHeader() {
+  const credentials = Buffer.from(`${USERNAME}:${PASSWORD}`).toString("base64");
+  return `Basic ${credentials}`;
+}
+
+function handleLoginPage(res, error) {
+  let html = `<html lang="en"><head><meta charset="utf-8"><title>Login</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; height: 100%; }
+  body { display: flex; justify-content: center; align-items: center; height: 100%; }
+  .login { background: #161b22; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,.3); width: 320px; }
+  h1 { font-size: 1.25rem; margin-bottom: 1.5rem; text-align: center; }
+  label { display: block; font-size: .875rem; margin-bottom: .25rem; font-weight: 500; }
+  input[type="text"], input[type="password"] { width: 100%; padding: .5rem; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; color: #c9d1d9; margin-bottom: 1rem; font-size: .875rem; }
+  button { width: 100%; padding: .5rem; background: #238636; color: #fff; border: none; border-radius: 6px; font-size: .875rem; cursor: pointer; }
+  button:hover { background: #2ea043; }
+  .error { color: #f85149; font-size: .8rem; margin-bottom: .75rem; text-align: center; }
+</style></head><body>
+<div class="login">
+<h1>OpenCode Login</h1>`;
+  if (error) {
+    html += `<div class="error">${escapeHtml(error)}</div>`;
+  }
+  html += `<form method="post" action="/login">
+<label for="username">Username</label>
+<input type="text" id="username" name="username" autocomplete="username" required>
+<label for="password">Password</label>
+<input type="password" id="password" name="password" autocomplete="current-password" required>
+<button type="submit" id="login-btn">Login</button>
+</form>
+</div></body></html>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Create proxy server
+const server = http.createServer((req, res) => {
+  const pathname = req.url?.split("?")[0] || "/";
+  const isPluginReq = PLUGIN_ENDPOINTS.includes(pathname) || PLUGIN_PREFIXES.some(p => pathname.startsWith(p));
+
+  logSleepInbound(req, pathname, isPluginReq ? "plugin" : "");
+
+  // Handle login page
+  if (pathname === "/login") {
+    if (req.method === "GET") {
+      handleLoginPage(res);
+      return;
+    }
+    if (req.method === "POST") {
+      collectRequestBody(req).then(body => {
+        const form = parseForm(body);
+        if (!timingSafeEqual(form.username, USERNAME) || !timingSafeEqual(form.password, PASSWORD)) {
+          handleLoginPage(res, "Invalid username or password.");
+          return;
+        }
+        const token = createSessionToken();
+        res.writeHead(302, {
+          "Set-Cookie": sessionCookieValue(token, SESSION_TTL_SECONDS),
+          Location: "/",
+        });
+        res.end();
+      });
+      return;
+    }
+    res.writeHead(405);
+    res.end();
+    return;
+  }
+
+  // Authenticate
+  if (requestNeedsAuth(pathname, isPluginReq) && !isAuthenticated(req)) {
+    res.writeHead(401, {
+      "WWW-Authenticate": `Basic realm="${AUTH_REALM}"`,
+    });
+    res.end();
+    return;
+  }
+
+  touchActivity();
+
+  if (process.env.DEBUG_PROXY) {
+    console.log(`[proxy] ${req.method} ${req.url}`);
+  }
+
+  const targetPort = isPluginReq ? PLUGIN_PORT : INTERNAL_PORT;
+  proxyRequest(req, res, targetPort);
+});
+
+// WebSocket upgrade handling
+server.on('upgrade', (req, socket, head) => {
+  logSleepInbound(req, pathnameOf(req.url), "upgrade");
+
+  if (!isAuthenticated(req)) {
+    socket.write(`HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="${AUTH_REALM}"\r\nConnection: close\r\n\r\n`);
+    socket.end();
+    return;
+  }
+
+  touchActivity();
+
+  proxyWebSocketUpgrade({
+    req,
+    socket,
+    head,
+    targetPort: INTERNAL_PORT,
+    onError: (err) => {
+      console.error('[websocket error]', err.message);
+    },
+  });
+});
+
+// Start monitor script
+function startMonitor() {
+  const enableMonitor = process.env.ENABLE_MONITOR === "true";
+  if (!enableMonitor) {
+    return;
+  }
+
+  const { spawn } = require("child_process");
+  const fs = require("fs");
+
+  const monitorScript = "/app/monitor.sh";
+
+  if (fs.existsSync(monitorScript)) {
+    fs.chmodSync(monitorScript, 0o755);
+
+    const logStream = fs.createWriteStream("/tmp/opencode_monitor.log", { flags: "a" });
+
+    const monitor = spawn("bash", [monitorScript], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    // Only write error-level logs to console; write all logs to file
+    monitor.stdout.on("data", (data) => {
+      logStream.write(data.toString());
+    });
+    monitor.stderr.on("data", (data) => {
+      const lines = data.toString().split("\n");
+      for (const line of lines) {
+        if (line) {
+          console.error("[monitor] " + line);
+          logStream.write("[stderr] " + line + "\n");
+        }
+      }
+    });
+
+    monitor.on("error", (err) => {
+      console.error("[wrapper] Monitor error:", err.message);
+    });
+
+    monitor.unref();
+    fs.writeFileSync("/tmp/opencode_monitor.pid", monitor.pid.toString());
+    console.log("[wrapper] Monitor started");
+  }
+}
 
 // Wait for OpenCode startup
 async function waitForOpencode(timeoutMs = 30000) {
   const start = Date.now();
+  const authHeader = buildAuthHeader();
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/global/health`);
+      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/global/health`, {
+        headers: { "Authorization": authHeader },
+      });
       if (res.ok) {
         return true;
       }
@@ -499,250 +691,49 @@ function isAuthenticated(req) {
 function sessionCookieValue(token, maxAge) {
   const attrs = [
     `${SESSION_COOKIE}=${token}`,
+    `Max-Age=${maxAge}`,
     "Path=/",
     "HttpOnly",
-    "Secure",
     "SameSite=Lax",
-    `Max-Age=${maxAge}`,
   ];
   return attrs.join("; ");
 }
 
-function setSessionCookie(res) {
-  res.setHeader("Set-Cookie", sessionCookieValue(createSessionToken(), SESSION_TTL_SECONDS));
-}
-
-function clearSessionCookie(res) {
-  res.setHeader("Set-Cookie", sessionCookieValue("", 0));
-}
-
-function sendUnauthorized(res) {
-  res.writeHead(401, {
-    "WWW-Authenticate": `Basic realm="${AUTH_REALM}"`,
-    "Content-Type": "text/plain",
-    "Cache-Control": "no-store",
-  });
-  res.end("Authentication required\n");
-}
-
-function redirect(res, location, statusCode = 302) {
-  res.writeHead(statusCode, {
-    Location: location,
-    "Cache-Control": "no-store",
-  });
-  res.end();
-}
-
-function escapeHtml(value) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function renderLoginPage(message = "") {
-  const detail = message
-    ? `<p class="msg">${escapeHtml(message)}</p>`
-    : `<p class="hint">Use the same password you already configured for OpenCode.</p>`;
-
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="theme-color" content="#f6f3ee" />
-    <title>OpenCode Login</title>
-    <style>
-      :root { color-scheme: light; }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: linear-gradient(160deg, #f6f3ee 0%, #e7dfd3 100%);
-        color: #1f1a17;
-        display: grid;
-        place-items: center;
-        padding: 24px;
-      }
-      .card {
-        width: min(100%, 420px);
-        background: rgba(255, 252, 247, 0.94);
-        border: 1px solid rgba(71, 57, 46, 0.12);
-        border-radius: 20px;
-        box-shadow: 0 24px 80px rgba(60, 43, 30, 0.14);
-        padding: 28px;
-      }
-      h1 { margin: 0 0 8px; font-size: 28px; }
-      p { margin: 0 0 18px; line-height: 1.5; }
-      .msg { color: #9f2f2f; }
-      .hint { color: #5a4b3f; }
-      label { display: block; margin: 0 0 8px; font-size: 14px; font-weight: 600; }
-      input {
-        width: 100%;
-        margin: 0 0 14px;
-        padding: 12px 14px;
-        border-radius: 12px;
-        border: 1px solid #cbbcab;
-        background: #fffdf9;
-        font-size: 16px;
-      }
-      button {
-        width: 100%;
-        border: 0;
-        border-radius: 12px;
-        padding: 12px 14px;
-        background: #1f1a17;
-        color: #fffaf3;
-        font-size: 16px;
-        font-weight: 600;
-        cursor: pointer;
-      }
-    </style>
-  </head>
-  <body>
-    <main class="card">
-      <h1>OpenCode</h1>
-      <p>Browser sessions use a secure cookie. CLI and automation can keep using HTTP Basic Auth.</p>
-      ${detail}
-      <form method="post" action="/login">
-        <label for="username">Username</label>
-        <input id="username" name="username" type="text" value="${escapeHtml(USERNAME)}" autocomplete="username" required />
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required />
-        <button type="submit">Sign In</button>
-      </form>
-    </main>
-  </body>
-</html>`;
-}
-
 function collectRequestBody(req) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     let body = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > 1024 * 1024) {
-        reject(new Error("Request body too large"));
-        req.destroy();
-      }
-    });
+    req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => resolve(body));
-    req.on("error", reject);
   });
 }
 
 function parseForm(body) {
-  const params = new URLSearchParams(body);
-  return {
-    username: params.get("username") || "",
-    password: params.get("password") || "",
-  };
-}
-
-function pathnameOf(url) {
-  return url.split("?")[0].split("#")[0];
+  const params = {};
+  if (!body) return params;
+  for (const part of body.split("&")) {
+    const [key, value] = part.split("=");
+    if (key) {
+      params[decodeURIComponent(key)] = decodeURIComponent(value?.replace(/\+/g, " ") || "");
+    }
+  }
+  return params;
 }
 
 function touchActivity() {
   try {
-    const ts = Math.floor(Date.now() / 1000)
-    if (!Number.isFinite(ts) || ts <= 0) {
-      console.error("[wrapper] Invalid activity timestamp, skipping update")
-      return
-    }
-    fs.mkdirSync(path.dirname(ACTIVITY_FILE), { recursive: true })
-    fs.writeFileSync(ACTIVITY_FILE, String(ts))
-  } catch (err) {
-    console.error(`[wrapper] Failed to update activity file: ${err.message}`)
-  }
-}
-
-function isDirectorySessionRoute(pathname) {
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts.length < 2) return false;
-  return parts[1] === "session";
-}
-
-function decodeRouteDirectory(pathname) {
-  if (!isDirectorySessionRoute(pathname)) return;
-  const parts = pathname.split("/").filter(Boolean);
-  const slug = parts[0];
-  if (!slug) return;
-  try {
-    return Buffer.from(slug, "base64url").toString("utf8");
+    fs.mkdirSync(path.dirname(ACTIVITY_FILE), { recursive: true });
+    fs.writeFileSync(ACTIVITY_FILE, String(Date.now()));
   } catch {
-    return;
+    // Best-effort
   }
 }
 
-function hasValidRouteDirectory(pathname) {
-  const dir = decodeRouteDirectory(pathname);
-  if (!dir) return true;
-  if (dir === WORKSPACE) return true;
-  return fs.existsSync(dir);
-}
-
-function routeSessionParts(pathname) {
-  if (!isDirectorySessionRoute(pathname)) return;
-  const parts = pathname.split("/").filter(Boolean);
-  return {
-    slug: parts[0],
-    tail: parts.slice(1),
-  };
-}
-
-function routeSessionLocation(directory, suffix = "/session") {
-  const slug = Buffer.from(directory).toString("base64url");
-  return `/${slug}${suffix}`;
-}
-
-function rootSessionLocation() {
-  return routeSessionLocation(WORKSPACE);
-}
-
-async function listDirectorySessions(directory) {
-  const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/session`, {
-    headers: {
-      "x-opencode-directory": directory,
-      Accept: "application/json",
-    },
-  });
-  if (!res.ok) throw new Error(`list sessions failed: ${res.status}`);
-  return await res.json();
-}
-
-async function createDirectorySession(directory) {
-  const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/session`, {
-    method: "POST",
-    headers: {
-      "x-opencode-directory": directory,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: "{}",
-  });
-  if (!res.ok) throw new Error(`create session failed: ${res.status}`);
-  return await res.json();
-}
-
-function isStaticAsset(pathname) {
-  return /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|json)$/.test(pathname);
-}
-
-function isHtmlNavigation(req, pathname, isPluginReq) {
-  if (req.method !== "GET" && req.method !== "HEAD") return false;
-  if (isPluginReq) return false;
-  if (isStaticAsset(pathname)) return false;
-  const accept = req.headers.accept || "";
-  if (req.headers["sec-fetch-dest"] === "document") return true;
-  if (req.headers["sec-fetch-mode"] === "navigate") return true;
-  return accept.includes("text/html");
+function pathnameOf(url) {
+  try {
+    return new URL(url, "http://localhost").pathname;
+  } catch {
+    return url?.split("?")[0] || "/";
+  }
 }
 
 // Plugin endpoint list - these endpoints route to the plugin port
@@ -751,433 +742,31 @@ const PLUGIN_ENDPOINTS = ['/register'];
 const PLUGIN_PREFIXES = ['/register/'];
 const PUBLIC_PATHS = new Set([
   "/favicon.ico",
-  "/favicon-v3.ico",
-  "/favicon-v3.svg",
-  "/favicon-96x96-v3.png",
-  "/apple-touch-icon-v3.png",
-  "/site.webmanifest",
-  "/social-share.png",
-  "/oc-theme-preload.js",
-  "/web-app-manifest-192x192.png",
-  "/web-app-manifest-512x512.png",
+  "/login",
+  "/logout",
 ]);
 
-// Check whether a request targets a plugin endpoint
-function isPluginEndpoint(url) {
-  const pathname = pathnameOf(url);
-  // Exact match
-  if (PLUGIN_ENDPOINTS.includes(pathname)) return true;
-  // Prefix match
-  if (PLUGIN_PREFIXES.some(prefix => pathname.startsWith(prefix))) return true;
-  return false;
-}
-
-function isPublicPath(pathname) {
-  return PUBLIC_PATHS.has(pathname);
-}
-
-function isStaticRoute(pathname) {
-  if (!sourceMode) return false;
-  if (isPublicPath(pathname)) return true;
-  if (pathname.startsWith("/assets/")) return true;
-  return false;
-}
-
-function shouldTrackActivity(req, pathname, isPluginReq) {
-  if (req.method === "OPTIONS") return false;
-  if (isPluginReq) return false;
-  if (pathname === "/login" || pathname === "/logout") return false;
-  if (pathname === "/global/health") return false;
-  if (pathname === "/global/event" || pathname === "/events") return false;
-  if (pathname === "/session/status") return false;
-  if (isStaticRoute(pathname)) return false;
-  return true;
-}
-
-function staticPath(pathname) {
-  const rel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  const file = path.resolve(WEB_ROOT, rel);
-  if (file === WEB_ROOT) return path.join(WEB_ROOT, "index.html");
-  if (!file.startsWith(WEB_ROOT + path.sep) && file !== path.join(WEB_ROOT, "index.html")) return;
-  return file;
-}
-
-function mimeType(file) {
-  const ext = path.extname(file).toLowerCase();
-  if (ext === ".html") return "text/html; charset=utf-8";
-  if (ext === ".js") return "text/javascript; charset=utf-8";
-  if (ext === ".css") return "text/css; charset=utf-8";
-  if (ext === ".json" || ext === ".webmanifest") return "application/manifest+json; charset=utf-8";
-  if (ext === ".svg") return "image/svg+xml";
-  if (ext === ".png") return "image/png";
-  if (ext === ".ico") return "image/x-icon";
-  if (ext === ".woff2") return "font/woff2";
-  if (ext === ".woff") return "font/woff";
-  if (ext === ".ttf") return "font/ttf";
-  return "application/octet-stream";
-}
-
-function cacheControl(file) {
-  if (file.endsWith("index.html")) return "no-store";
-  return "public, max-age=31536000, immutable";
-}
-
-function sendStatic(res, file, reqMethod = "GET") {
-  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
-  const body = fs.readFileSync(file);
-  res.writeHead(200, {
-    "Content-Type": mimeType(file),
-    "Content-Length": body.length,
-    "Cache-Control": cacheControl(file),
-  });
-  if (reqMethod === "HEAD") {
-    res.end();
-    return true;
-  }
-  res.end(body);
-  return true;
-}
-
-function handleStatic(req, res, pathname) {
-  if (isStaticRoute(pathname)) {
-    return sendStatic(res, staticPath(pathname), req.method);
-  }
-  return false;
-}
-
-function sendMissingStatic(res, pathname) {
-  const status = pathname === "/" ? 500 : 404;
-  const body =
-    pathname === "/"
-      ? `Missing local web app entrypoint: ${staticPath("/")}\n`
-      : `Static asset not found: ${pathname}\n`;
-  res.writeHead(status, {
-    "Content-Type": "text/plain; charset=utf-8",
-    "Cache-Control": "no-store",
-  });
-  res.end(body);
-}
-
-function normalizeCspValue(value) {
-  if (!value) return "";
-  return Array.isArray(value) ? value.join("; ") : value;
-}
-
-function appendCspSource(policy, directive, source) {
-  const trimmed = policy.trim();
-  if (!trimmed) return `${directive} ${source}`;
-
-  const parts = trimmed
-    .split(";")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const index = parts.findIndex((part) => part === directive || part.startsWith(`${directive} `));
-  if (index === -1) {
-    parts.push(`${directive} ${source}`);
-    return parts.join("; ");
-  }
-
-  const tokens = parts[index].split(/\s+/);
-  if (!tokens.includes(source)) {
-    tokens.push(source);
-    parts[index] = tokens.join(" ");
-  }
-  return parts.join("; ");
-}
-
-function applyCspRelaxation(headers) {
-  const next = { ...headers };
-  let policy = normalizeCspValue(next["content-security-policy"]);
-  if (!policy) return next;
-
-  policy = appendCspSource(policy, "script-src", "https://static.cloudflareinsights.com");
-  policy = appendCspSource(policy, "connect-src", "https://opencode.ai");
-  next["content-security-policy"] = policy;
-  return next;
-}
-
-function handleLoginPage(res, message) {
-  const body = renderLoginPage(message);
-  res.writeHead(200, {
-    "Content-Type": "text/html; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body),
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": "default-src 'none'; script-src https://static.cloudflareinsights.com; style-src 'unsafe-inline'; form-action 'self'; img-src 'self' data: https:; base-uri 'none'",
-  });
-  res.end(body);
-}
-
-async function handleLogin(req, res) {
-  try {
-    const body = await collectRequestBody(req);
-    const form = parseForm(body);
-    if (!timingSafeEqual(form.username, USERNAME) || !timingSafeEqual(form.password, PASSWORD)) {
-      handleLoginPage(res, "Invalid username or password.");
-      return;
-    }
-
-    setSessionCookie(res);
-    redirect(res, "/");
-  } catch (err) {
-    console.error("[auth error]", err.message);
-    res.writeHead(400, {
-      "Content-Type": "text/plain",
-      "Cache-Control": "no-store",
-    });
-    res.end("Bad request\n");
-  }
-}
-
-function extractDirectoryFromURL(urlValue) {
-  if (!urlValue) return;
-  try {
-    const u = new URL(urlValue);
-    return decodeRouteDirectory(u.pathname);
-  } catch {
-    return;
-  }
-}
-
-const QUESTION_PATH_RE = /^\/question\/([^/]+)\/(reply|reject)$/;
-
-async function resolveQuestionDirectory(referer, origin, requestID) {
-  const fromHeader = extractDirectoryFromURL(referer) || extractDirectoryFromURL(origin);
-
-  if (fromHeader && fs.existsSync(fromHeader)) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/question?directory=${encodeURIComponent(fromHeader)}`);
-      if (res.ok) {
-        const questions = await res.json();
-        if (Array.isArray(questions) && questions.some((q) => q.id === requestID)) {
-          return fromHeader;
-        }
-      }
-    } catch {}
-  }
-
-  try {
-    const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/question?directory=${encodeURIComponent(WORKSPACE)}`);
-    if (res.ok) {
-      const questions = await res.json();
-      if (Array.isArray(questions) && questions.some((q) => q.id === requestID)) {
-        return WORKSPACE;
-      }
-    }
-  } catch {}
-
-  if (fromHeader && fs.existsSync(fromHeader)) return fromHeader;
-
-  console.error(
-    "[wrapper] question reply: cannot determine directory",
-    JSON.stringify({
-      requestID,
-      referer: compactLog(forwardedHeaderValue(referer), 200),
-      origin: compactLog(forwardedHeaderValue(origin), 200),
-      workspace: WORKSPACE,
-    }),
-  );
-}
-
 function proxyRequest(req, res, targetPort) {
-  const forwardHeaders = { ...req.headers };
-  delete forwardHeaders.authorization;
-  delete forwardHeaders.cookie;
-
-  let proxyPath = req.url;
-  if (proxyPath === '/events' || proxyPath.startsWith('/events?')) {
-    proxyPath = proxyPath.replace('/events', '/global/event');
-  }
-
-  const questionMatch = QUESTION_PATH_RE.exec(pathnameOf(proxyPath));
-  if (questionMatch && !forwardHeaders["x-opencode-directory"]) {
-    const requestID = questionMatch[1];
-    resolveQuestionDirectory(req.headers.referer, req.headers.origin, requestID)
-      .then((dir) => {
-        if (dir) forwardHeaders["x-opencode-directory"] = dir;
-      })
-      .catch(() => {})
-      .finally(() => sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort));
-    return;
-  }
-
-  sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort);
-}
-
-function sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort) {
-
   const options = {
     hostname: "127.0.0.1",
     port: targetPort,
-    path: proxyPath,
+    path: req.url,
     method: req.method,
-    headers: forwardHeaders,
+    headers: { ...req.headers, Connection: "close" },
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode, applyCspRelaxation(proxyRes.headers));
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
     proxyRes.pipe(res);
   });
 
   proxyReq.on("error", (err) => {
-    console.error("[proxy error]", err.message);
-    if (!res.headersSent) {
-      res.writeHead(502, { "Content-Type": "text/plain" });
-      res.end("Gateway error\n");
-    }
+    console.error(`[proxy] Error proxying to port ${targetPort}:`, err.message);
+    res.writeHead(502);
+    res.end();
   });
 
   req.pipe(proxyReq);
-}
-
-// Create proxy server
-const server = http.createServer(async (req, res) => {
-  const pathname = pathnameOf(req.url);
-  const isPluginReq = isPluginEndpoint(req.url);
-
-  if (shouldLogSleepInbound(req, pathname, isPluginReq)) {
-    logSleepInbound(req, pathname);
-  }
-
-  if (pathname === "/login" && (req.method === "GET" || req.method === "HEAD")) {
-    handleLoginPage(res);
-    return;
-  }
-
-  if (pathname === "/login" && req.method === "POST") {
-    await handleLogin(req, res);
-    return;
-  }
-
-  if (pathname === "/logout" && (req.method === "POST" || req.method === "GET")) {
-    clearSessionCookie(res);
-    redirect(res, "/login");
-    return;
-  }
-
-  if (handleStatic(req, res, pathname)) return;
-  if (isStaticRoute(pathname)) {
-    sendMissingStatic(res, pathname);
-    return;
-  }
-
-  if (isHtmlNavigation(req, pathname, isPluginReq) && !hasValidRouteDirectory(pathname)) {
-    console.warn(`[wrapper] Missing route directory for ${pathname}, redirecting to workspace root`);
-    redirect(res, rootSessionLocation());
-    return;
-  }
-
-  if (!isAuthenticated(req)) {
-    if (isHtmlNavigation(req, pathname, isPluginReq)) {
-      redirect(res, "/login");
-      return;
-    }
-    sendUnauthorized(res);
-    return;
-  }
-
-  if (shouldTrackActivity(req, pathname, isPluginReq)) {
-    touchActivity();
-  }
-
-  if (isHtmlNavigation(req, pathname, isPluginReq)) {
-    const route = routeSessionParts(pathname);
-    const directory = decodeRouteDirectory(pathname);
-    if (route && directory && route.tail.length === 1 && route.tail[0] === "session" && fs.existsSync(directory)) {
-      try {
-        const sessions = await listDirectorySessions(directory);
-        if (sessions.length === 0) {
-          const session = await createDirectorySession(directory);
-          const location = routeSessionLocation(directory, `/session/${session.id}`);
-          console.log(`[wrapper] Created session ${session.id} for ${directory}`);
-          redirect(res, location);
-          return;
-        }
-      } catch (err) {
-        console.error(`[wrapper] Failed to auto-create session for ${directory}: ${err.message}`);
-      }
-    }
-    if (sendStatic(res, staticPath("/"), req.method)) {
-      return;
-    }
-    sendMissingStatic(res, "/");
-    return;
-  }
-
-  if (process.env.DEBUG_PROXY) {
-    console.log(`[proxy] ${req.method} ${req.url}`);
-  }
-
-  const targetPort = isPluginReq ? PLUGIN_PORT : INTERNAL_PORT;
-  proxyRequest(req, res, targetPort);
-});
-
-// WebSocket upgrade handling
-server.on('upgrade', (req, socket, head) => {
-  logSleepInbound(req, pathnameOf(req.url), "upgrade");
-
-  if (!isAuthenticated(req)) {
-    socket.write(`HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="${AUTH_REALM}"\r\nConnection: close\r\n\r\n`);
-    socket.end();
-    return;
-  }
-
-  touchActivity();
-
-  proxyWebSocketUpgrade({
-    req,
-    socket,
-    head,
-    targetPort: INTERNAL_PORT,
-    onError: (err) => {
-      console.error('[websocket error]', err.message);
-    },
-  });
-});
-
-// Start monitor script
-function startMonitor() {
-  const enableMonitor = process.env.ENABLE_MONITOR === "true";
-  if (!enableMonitor) {
-    return;
-  }
-
-  const { spawn } = require("child_process");
-  const fs = require("fs");
-
-  const monitorScript = "/app/monitor.sh";
-
-  if (fs.existsSync(monitorScript)) {
-    fs.chmodSync(monitorScript, 0o755);
-
-    const logStream = fs.createWriteStream("/tmp/opencode_monitor.log", { flags: "a" });
-
-    const monitor = spawn("bash", [monitorScript], {
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    // Only write error-level logs to console; write all logs to file
-    monitor.stdout.on("data", (data) => {
-      logStream.write(data.toString());
-    });
-    monitor.stderr.on("data", (data) => {
-      const lines = data.toString().split("\n");
-      for (const line of lines) {
-        if (line) {
-          console.error("[monitor] " + line);
-          logStream.write("[stderr] " + line + "\n");
-        }
-      }
-    });
-
-    monitor.on("error", (err) => {
-      console.error("[wrapper] Monitor error:", err.message);
-    });
-
-    monitor.unref();
-    fs.writeFileSync("/tmp/opencode_monitor.pid", monitor.pid.toString());
-    console.log("[wrapper] Monitor started");
-  }
 }
 
 // Start server
