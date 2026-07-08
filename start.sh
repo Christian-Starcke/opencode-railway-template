@@ -12,6 +12,20 @@ if [ -n "${PREPEND_PATH:-}" ]; then
   export PATH="${PREPEND_PATH}:${PATH}"
 fi
 
+# Volume maintenance + workspace bootstrap (scripts on /data volume; hermes-agent-railway)
+mkdir -p /data/logs
+if [ -x /data/workspace-bootstrap.sh ]; then
+  bash /data/workspace-bootstrap.sh >> /data/logs/workspace-bootstrap.log 2>&1 || true
+elif [ -n "${OPENCODE_BOOTSTRAP_RAW_URL:-}" ] && command -v curl >/dev/null 2>&1; then
+  curl -fsSL "${OPENCODE_BOOTSTRAP_RAW_URL}" | bash >> /data/logs/workspace-bootstrap.log 2>&1 || true
+else
+  [ -x /data/opencode-volume-maintain.sh ] && bash /data/opencode-volume-maintain.sh >> /data/logs/volume-maintain.log 2>&1 || true
+  [ -x /data/opencode-mcp-bootstrap.sh ] && bash /data/opencode-mcp-bootstrap.sh >> /data/logs/mcp-bootstrap.log 2>&1 || true
+  if [ -x /data/prism-workspace-bootstrap.sh ]; then
+    WORKSPACE_BOOTSTRAP=true OPENCODE_WORKSPACE=/data/workspace bash /data/prism-workspace-bootstrap.sh >> /data/logs/workspace-bootstrap.log 2>&1 || true
+  fi
+fi
+
 # Update globally installed skills on each deploy (enabled by default)
 # Set SKILLS_UPDATE_ON_START=false to disable
 if [ "${SKILLS_UPDATE_ON_START:-true}" != "false" ]; then
