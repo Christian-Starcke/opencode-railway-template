@@ -800,6 +800,50 @@ function resolveRequestDirectory(req) {
   return WORKSPACE;
 }
 
+// OpenCode web 1.14.x can throw "useGlobalSync must be used within GlobalSyncProvider"
+// after opening a project (often on /session). The workspace UI still mounts underneath;
+// dismiss that known overlay so Railway users can actually use the app.
+const SPA_CRASH_PATCH = `<script data-oc-railway-patch="globalsync">
+(function () {
+  var NEEDLE = "useGlobalSync must be used within GlobalSyncProvider";
+  function dismiss() {
+    try {
+      var nodes = document.querySelectorAll("h1");
+      for (var i = 0; i < nodes.length; i++) {
+        if ((nodes[i].textContent || "").indexOf("Something went wrong") === -1) continue;
+        var root = nodes[i];
+        for (var d = 0; d < 10 && root && root.parentElement; d++) {
+          if (root.parentElement.id === "root") break;
+          root = root.parentElement;
+        }
+        if (root && root.parentElement) root.remove();
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  function watch() {
+    if (dismiss()) return;
+    var body = document.body;
+    if (!body || typeof MutationObserver === "undefined") return;
+    var obs = new MutationObserver(function () {
+      if ((document.body && document.body.innerText || "").indexOf(NEEDLE) !== -1) dismiss();
+    });
+    obs.observe(body, { childList: true, subtree: true });
+    setTimeout(function () { try { obs.disconnect(); } catch (e) {} }, 15000);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", watch);
+  else watch();
+})();
+</script>`;
+
+function shouldPatchHtml(req, proxyRes) {
+  if (process.env.OPENCODE_PATCH_GLOBALSYNC === "false") return false;
+  if ((req.method || "GET") !== "GET" && (req.method || "GET") !== "HEAD") return false;
+  const ct = String(proxyRes.headers["content-type"] || "");
+  return ct.includes("text/html");
+}
+
 function proxyRequest(req, res, targetPort) {
   const forwardHeaders = { ...req.headers, Connection: "close" };
   // Keep remote web UI scoped to the Railway workspace even when the SPA
@@ -817,8 +861,26 @@ function proxyRequest(req, res, targetPort) {
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res);
+    if (!shouldPatchHtml(req, proxyRes)) {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+      return;
+    }
+
+    const chunks = [];
+    proxyRes.on("data", (chunk) => chunks.push(chunk));
+    proxyRes.on("end", () => {
+      let html = Buffer.concat(chunks).toString("utf8");
+      if (html.includes("</body>") && !html.includes('data-oc-railway-patch="globalsync"')) {
+        html = html.replace("</body>", `${SPA_CRASH_PATCH}</body>`);
+      }
+      const out = Buffer.from(html, "utf8");
+      const headers = { ...proxyRes.headers, "content-length": String(out.length) };
+      delete headers["content-encoding"];
+      delete headers["transfer-encoding"];
+      res.writeHead(proxyRes.statusCode, headers);
+      res.end(out);
+    });
   });
 
   proxyReq.on("error", (err) => {
