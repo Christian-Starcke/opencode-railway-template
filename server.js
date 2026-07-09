@@ -384,7 +384,7 @@ opencode.on("close", (code, signal) => {
 });
 
 function isHtmlNavigation(req, pathname, isPluginReq) {
-  if (req.method !== "GET") return false;
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
   if (isPluginReq) return false;
   if (pathname.startsWith("/api/")) return false;
   if (pathname.startsWith("/global/")) return false;
@@ -415,8 +415,26 @@ function requestNeedsAuth(pathname, isPluginReq) {
   if (pathname === "/global/health") return false;
   if (pathname === "/global/event" || pathname === "/events") return false;
   if (pathname === "/session/status") return false;
+  // index.html exists under WEB_ROOT, but "/" must not bypass auth or auto-open
+  // will redirect unauthenticated browsers into a blank 401 workspace page.
+  if (pathname === "/") return true;
   if (isStaticRoute(pathname)) return false;
   return true;
+}
+
+function safeNextPath(value) {
+  if (!value || typeof value !== "string") return "";
+  if (!value.startsWith("/")) return "";
+  if (value.startsWith("//")) return "";
+  if (/^https?:/i.test(value)) return "";
+  if (value === "/login" || value.startsWith("/login?")) return "";
+  return value;
+}
+
+function loginRedirectLocation(req) {
+  const next = safeNextPath(req.url || "/");
+  if (!next || next === "/") return "/login";
+  return `/login?next=${encodeURIComponent(next)}`;
 }
 
 function buildAuthHeader() {
@@ -424,7 +442,8 @@ function buildAuthHeader() {
   return `Basic ${credentials}`;
 }
 
-function handleLoginPage(res, error) {
+function handleLoginPage(res, error, nextPath) {
+  const next = safeNextPath(nextPath);
   let html = `<html lang="en"><head><meta charset="utf-8"><title>Login</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -447,7 +466,12 @@ function handleLoginPage(res, error) {
 <label for="username">Username</label>
 <input type="text" id="username" name="username" autocomplete="username" required>
 <label for="password">Password</label>
-<input type="password" id="password" name="password" autocomplete="current-password" required>
+<input type="password" id="password" name="password" autocomplete="current-password" required>`;
+  if (next) {
+    html += `
+<input type="hidden" name="next" value="${escapeHtml(next)}">`;
+  }
+  html += `
 <button type="submit" id="login-btn">Login</button>
 </form>
 </div></body></html>`;
@@ -502,21 +526,33 @@ const server = http.createServer((req, res) => {
 
   // Handle login page
   if (pathname === "/login") {
-    if (req.method === "GET") {
-      handleLoginPage(res);
+    if (req.method === "GET" || req.method === "HEAD") {
+      let nextPath = "";
+      try {
+        nextPath = new URL(req.url || "/login", "http://localhost").searchParams.get("next") || "";
+      } catch {
+        nextPath = "";
+      }
+      if (req.method === "HEAD") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end();
+        return;
+      }
+      handleLoginPage(res, undefined, nextPath);
       return;
     }
     if (req.method === "POST") {
       collectRequestBody(req).then(body => {
         const form = parseForm(body);
+        const next = safeNextPath(form.next);
         if (!timingSafeEqual(form.username, USERNAME) || !timingSafeEqual(form.password, PASSWORD)) {
-          handleLoginPage(res, "Invalid username or password.");
+          handleLoginPage(res, "Invalid username or password.", next);
           return;
         }
         const token = createSessionToken();
         res.writeHead(302, {
           "Set-Cookie": sessionCookieValue(token, SESSION_TTL_SECONDS),
-          Location: workspaceEntryPath(),
+          Location: next || workspaceEntryPath(),
         });
         res.end();
       });
@@ -529,6 +565,12 @@ const server = http.createServer((req, res) => {
 
   // Authenticate
   if (requestNeedsAuth(pathname, isPluginReq) && !isAuthenticated(req)) {
+    // Browser navigations get the login form; API/XHR keep Basic challenge.
+    if (isHtmlNavigation(req, pathname, isPluginReq)) {
+      res.writeHead(302, { Location: loginRedirectLocation(req) });
+      res.end();
+      return;
+    }
     res.writeHead(401, {
       "WWW-Authenticate": `Basic realm="${AUTH_REALM}"`,
     });
