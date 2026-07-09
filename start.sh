@@ -40,6 +40,27 @@ if [ "${OPENCODE_FLATTEN_WORKSPACE:-}" = "true" ]; then
   } >> "$FLATTEN_LOG" 2>&1 || true
 fi
 
+# One-shot: remove non-essential workspace dirs (SSH unreliable).
+# Set OPENCODE_CLEANUP_DIRS=true for one deploy, then delete the variable.
+if [ "${OPENCODE_CLEANUP_DIRS:-}" = "true" ]; then
+  mkdir -p /data/logs
+  CLEANUP_LOG="/data/logs/cleanup-dirs.log"
+  {
+    echo "[cleanup] $(date -u +%Y-%m-%dT%H:%M:%SZ) starting"
+    WS="${OPENCODE_WORKSPACE:-/data/workspace}"
+    for name in data retell scripts supabase; do
+      target="${WS}/${name}"
+      if [ -e "$target" ]; then
+        echo "[cleanup] removing $target"
+        rm -rf "$target"
+      else
+        echo "[cleanup] skip missing $target"
+      fi
+    done
+    echo "[cleanup] done — delete OPENCODE_CLEANUP_DIRS after this deploy"
+  } >> "$CLEANUP_LOG" 2>&1 || true
+fi
+
 # Update globally installed skills on each deploy (enabled by default)
 # Set SKILLS_UPDATE_ON_START=false to disable
 if [ "${SKILLS_UPDATE_ON_START:-true}" != "false" ]; then
