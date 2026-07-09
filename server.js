@@ -538,6 +538,16 @@ const server = http.createServer((req, res) => {
 
   touchActivity();
 
+  // Wrapper-owned static patch (allowed by OpenCode CSP script-src 'self').
+  if (pathname === "/__railway/globalsync-patch.js") {
+    res.writeHead(200, {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    res.end(SPA_CRASH_PATCH_JS);
+    return;
+  }
+
   // Skip the broken empty "Open project" picker by opening the workspace directly.
   if (shouldAutoOpenWorkspace(req, pathname)) {
     res.writeHead(302, { Location: workspaceEntryPath() });
@@ -803,8 +813,7 @@ function resolveRequestDirectory(req) {
 // OpenCode web 1.14.x can throw "useGlobalSync must be used within GlobalSyncProvider"
 // after opening a project (often on /session). The workspace UI still mounts underneath;
 // dismiss that known overlay so Railway users can actually use the app.
-const SPA_CRASH_PATCH = `<script data-oc-railway-patch="globalsync">
-(function () {
+const SPA_CRASH_PATCH_JS = `(function () {
   var NEEDLE = "useGlobalSync must be used within GlobalSyncProvider";
   function dismiss() {
     try {
@@ -834,8 +843,10 @@ const SPA_CRASH_PATCH = `<script data-oc-railway-patch="globalsync">
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", watch);
   else watch();
-})();
-</script>`;
+})();`;
+
+const SPA_CRASH_PATCH_TAG =
+  `<script src="/__railway/globalsync-patch.js" data-oc-railway-patch="globalsync"></script>`;
 
 function shouldPatchHtml(req, proxyRes) {
   if (process.env.OPENCODE_PATCH_GLOBALSYNC === "false") return false;
@@ -850,6 +861,11 @@ function proxyRequest(req, res, targetPort) {
   // forgets to send x-opencode-directory (common on the project picker page).
   if (!forwardHeaders["x-opencode-directory"]) {
     forwardHeaders["x-opencode-directory"] = resolveRequestDirectory(req);
+  }
+  // Need plain HTML to inject the GlobalSync crash patch (gzip bodies can't be string-patched).
+  if ((req.method || "GET") === "GET" || (req.method || "GET") === "HEAD") {
+    delete forwardHeaders["accept-encoding"];
+    forwardHeaders["accept-encoding"] = "identity";
   }
 
   const options = {
@@ -872,7 +888,7 @@ function proxyRequest(req, res, targetPort) {
     proxyRes.on("end", () => {
       let html = Buffer.concat(chunks).toString("utf8");
       if (html.includes("</body>") && !html.includes('data-oc-railway-patch="globalsync"')) {
-        html = html.replace("</body>", `${SPA_CRASH_PATCH}</body>`);
+        html = html.replace("</body>", `${SPA_CRASH_PATCH_TAG}</body>`);
       }
       const out = Buffer.from(html, "utf8");
       const headers = { ...proxyRes.headers, "content-length": String(out.length) };
