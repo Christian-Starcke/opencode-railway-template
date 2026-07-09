@@ -12,18 +12,32 @@ if [ -n "${PREPEND_PATH:-}" ]; then
   export PATH="${PREPEND_PATH}:${PATH}"
 fi
 
-# Volume maintenance + workspace bootstrap (scripts on /data volume; hermes-agent-railway)
-mkdir -p /data/logs
-if [ -x /data/workspace-bootstrap.sh ]; then
-  bash /data/workspace-bootstrap.sh >> /data/logs/workspace-bootstrap.log 2>&1 || true
-elif [ -n "${OPENCODE_BOOTSTRAP_RAW_URL:-}" ] && command -v curl >/dev/null 2>&1; then
-  curl -fsSL "${OPENCODE_BOOTSTRAP_RAW_URL}" | bash >> /data/logs/workspace-bootstrap.log 2>&1 || true
-else
-  [ -x /data/opencode-volume-maintain.sh ] && bash /data/opencode-volume-maintain.sh >> /data/logs/volume-maintain.log 2>&1 || true
-  [ -x /data/opencode-mcp-bootstrap.sh ] && bash /data/opencode-mcp-bootstrap.sh >> /data/logs/mcp-bootstrap.log 2>&1 || true
-  if [ -x /data/prism-workspace-bootstrap.sh ]; then
-    WORKSPACE_BOOTSTRAP=true OPENCODE_WORKSPACE=/data/workspace bash /data/prism-workspace-bootstrap.sh >> /data/logs/workspace-bootstrap.log 2>&1 || true
-  fi
+# One-shot flatten: remove nested .git clones under /data/workspace (SSH unreliable).
+# Set OPENCODE_FLATTEN_WORKSPACE=true for one deploy, then delete the variable.
+if [ "${OPENCODE_FLATTEN_WORKSPACE:-}" = "true" ]; then
+  mkdir -p /data/logs
+  FLATTEN_LOG="/data/logs/flatten-workspace.log"
+  {
+    echo "[flatten] $(date -u +%Y-%m-%dT%H:%M:%SZ) starting"
+    WS="${OPENCODE_WORKSPACE:-/data/workspace}"
+    if [ ! -d "${WS}/.git" ]; then
+      echo "[flatten] skip: ${WS}/.git missing (expected n8n-as-code root)"
+    else
+      for dir in "${WS}"/*/; do
+        [ -d "$dir" ] || continue
+        if [ -d "${dir}.git" ]; then
+          echo "[flatten] removing nested git clone: $dir"
+          rm -rf "$dir"
+        fi
+      done
+      WT="/data/.local/share/opencode/worktree"
+      if [ -d "$WT" ]; then
+        echo "[flatten] clearing stale worktrees under $WT"
+        rm -rf "${WT:?}"/*
+      fi
+    fi
+    echo "[flatten] done — delete OPENCODE_FLATTEN_WORKSPACE after this deploy"
+  } >> "$FLATTEN_LOG" 2>&1 || true
 fi
 
 # Update globally installed skills on each deploy (enabled by default)
@@ -31,12 +45,6 @@ fi
 if [ "${SKILLS_UPDATE_ON_START:-true}" != "false" ]; then
   echo "[skills] Updating global skills..."
   npx skills update -g 2>&1 || echo "[skills] WARNING: Skills update failed, continuing anyway..."
-fi
-
-# Sync workspace repos — pull latest from all git repos under the workspace
-# Runs on every start/deploy. Skips silently if prism-sync.sh isn't present.
-if [ -x /app/prism-sync.sh ]; then
-  /app/prism-sync.sh 2>&1 || echo "[prism-sync] WARNING: Sync failed, continuing anyway..."
 fi
 
 exec node /app/server.js

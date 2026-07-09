@@ -2,9 +2,6 @@
 /**
  * OpenCode Railway Wrapper
  * Provides graceful shutdown, log classification, and Basic Auth proxying
- *
- * Fork: added Basic Auth support to health check for newer OpenCode versions
- * that protect /global/health with the server password.
  */
 
 const http = require("http");
@@ -317,372 +314,95 @@ function shouldSuppressLog(trimmed) {
   if (trimmed.includes('Executable not found in $PATH: "xdg-open"')) return true;
   if (
     trimmed.startsWith("INFO") &&
+    trimmed.includes("service=bus") &&
     (
-      trimmed.includes("service=server") &&
-      (
-        trimmed.includes("path=/global/health") ||
-        trimmed.includes("path=/session/status") ||
-        trimmed.includes("path=/pty/")
-      )
+      trimmed.includes("type=message.part.delta") ||
+      trimmed.includes("type=message.part.updated")
     )
   ) return true;
   if (
     trimmed.startsWith("INFO") &&
+    trimmed.includes("service=server") &&
     (
-      trimmed.includes("service=server") &&
-      trimmed.includes("res.status")
+      trimmed.includes("path=/global/health") ||
+      trimmed.includes("path=/session/status") ||
+      trimmed.includes("path=/pty/")
     )
   ) return true;
   if (
     trimmed.startsWith("INFO") &&
-    trimmed.includes("service=db") &&
-    trimmed.includes("snapshot") &&
-    trimmed.includes("prune=")
+    trimmed.includes("service=pty") &&
+    (
+      trimmed.includes("client connected to session") ||
+      trimmed.includes("client disconnected from session")
+    )
+  ) return true;
+  if (
+    trimmed.startsWith("ERROR") &&
+    trimmed.includes("service=mcp") &&
+    trimmed.includes("failed to get prompts") &&
+    trimmed.includes("Method not found")
   ) return true;
   return false;
 }
 
-const logBuffer = [];
-opencode.stderr.on("data", (data) => {
+function shouldTouchActivityFromLog(trimmed) {
+  if (!trimmed.startsWith("INFO")) return false;
+  if (trimmed.includes("service=session.processor") && trimmed.includes(" process")) return true;
+  if (trimmed.includes("service=llm") && trimmed.includes(" stream")) return true;
+  if (trimmed.includes("type=message.part.delta") && trimmed.includes(" publishing")) return true;
+  if (trimmed.includes("type=message.part.updated") && trimmed.includes(" publishing")) return true;
+  return false;
+}
+
+// Log classification: ERROR/WARN -> stderr, others -> stdout
+function classifyAndOutput(line) {
+  const trimmed = line.toString().trim();
+  if (!trimmed) return;
+  if (shouldTouchActivityFromLog(trimmed)) touchActivity();
+  if (shouldSuppressLog(trimmed)) return;
+
+  if (trimmed.startsWith("ERROR") || trimmed.startsWith("WARN")) {
+    console.error(trimmed);
+  } else {
+    console.log(trimmed);
+  }
+}
+
+// Handle stdout
+opencode.stdout?.on("data", (data) => {
   const lines = data.toString().split("\n");
   for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed) {
-      if (shouldSuppressLog(trimmed)) continue;
-      logBuffer.push(trimmed);
-      if (logBuffer.length > 100) {
-        const popped = logBuffer.shift();
-        console.log(popped);
-      }
-    }
+    if (line) classifyAndOutput(line);
   }
 });
 
-opencode.stdout.on("data", (data) => {
+// Handle stderr
+opencode.stderr?.on("data", (data) => {
   const lines = data.toString().split("\n");
   for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed) {
-      logBuffer.push(trimmed);
-      if (logBuffer.length > 100) {
-        const popped = logBuffer.shift();
-        console.log(popped);
-      }
-    }
+    if (line) classifyAndOutput(line);
   }
 });
 
+// Error handling
 opencode.on("error", (err) => {
-  console.error("[wrapper] OpenCode error:", err.message);
+  console.error(`[wrapper] Failed to spawn opencode: ${err.message}`);
+  process.exit(1);
 });
 
-opencode.on("close", (code, signal) => {
+// Process exit handling
+opencode.on("exit", (code, signal) => {
   console.log(`[wrapper] opencode exited with code=${code}, signal=${signal}`);
-  if (!receivedSigterm) {
-    process.exit(code || 0);
-  }
+  process.exit(code ?? 0);
 });
-
-function isHtmlNavigation(req, pathname, isPluginReq) {
-  if (req.method !== "GET" && req.method !== "HEAD") return false;
-  if (isPluginReq) return false;
-  if (pathname.startsWith("/api/")) return false;
-  if (pathname.startsWith("/global/")) return false;
-  if (pathname.startsWith("/session/")) return false;
-  if (pathname.startsWith("/v1/")) return false;
-  if (pathname.startsWith("/_/")) return false;
-  if (pathname.startsWith("/__/")) return false;
-  if (pathname.startsWith("/pty/")) return false;
-  if (extname(pathname)) return false;
-  return true;
-}
-
-function extname(pathname) {
-  const last = pathname.lastIndexOf(".");
-  if (last === -1) return "";
-  const ext = pathname.slice(last).toLowerCase();
-  const known = [".js", ".css", ".html", ".json", ".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".map", ".wasm", ".woff", ".woff2", ".ttf", ".eot", ".webp", ".avif"];
-  if (known.includes(ext)) return ext;
-  return "";
-}
-
-function isStaticRoute(pathname) {
-  return !!WEB_ROOT && fs.existsSync(path.join(WEB_ROOT, pathname === "/" ? "index.html" : pathname));
-}
-
-function requestNeedsAuth(pathname, isPluginReq) {
-  if (pathname === "/login" || pathname === "/logout") return false;
-  if (pathname === "/global/health") return false;
-  if (pathname === "/global/event" || pathname === "/events") return false;
-  if (pathname === "/session/status") return false;
-  // index.html exists under WEB_ROOT, but "/" must not bypass auth or auto-open
-  // will redirect unauthenticated browsers into a blank 401 workspace page.
-  if (pathname === "/") return true;
-  if (isStaticRoute(pathname)) return false;
-  return true;
-}
-
-function safeNextPath(value) {
-  if (!value || typeof value !== "string") return "";
-  if (!value.startsWith("/")) return "";
-  if (value.startsWith("//")) return "";
-  if (/^https?:/i.test(value)) return "";
-  if (value === "/login" || value.startsWith("/login?")) return "";
-  return value;
-}
-
-function loginRedirectLocation(req) {
-  const next = safeNextPath(req.url || "/");
-  if (!next || next === "/") return "/login";
-  return `/login?next=${encodeURIComponent(next)}`;
-}
-
-function buildAuthHeader() {
-  const credentials = Buffer.from(`${USERNAME}:${PASSWORD}`).toString("base64");
-  return `Basic ${credentials}`;
-}
-
-function handleLoginPage(res, error, nextPath) {
-  const next = safeNextPath(nextPath);
-  let html = `<html lang="en"><head><meta charset="utf-8"><title>Login</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; height: 100%; }
-  body { display: flex; justify-content: center; align-items: center; height: 100%; }
-  .login { background: #161b22; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,.3); width: 320px; }
-  h1 { font-size: 1.25rem; margin-bottom: 1.5rem; text-align: center; }
-  label { display: block; font-size: .875rem; margin-bottom: .25rem; font-weight: 500; }
-  input[type="text"], input[type="password"] { width: 100%; padding: .5rem; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; color: #c9d1d9; margin-bottom: 1rem; font-size: .875rem; }
-  button { width: 100%; padding: .5rem; background: #238636; color: #fff; border: none; border-radius: 6px; font-size: .875rem; cursor: pointer; }
-  button:hover { background: #2ea043; }
-  .error { color: #f85149; font-size: .8rem; margin-bottom: .75rem; text-align: center; }
-</style></head><body>
-<div class="login">
-<h1>OpenCode Login</h1>`;
-  if (error) {
-    html += `<div class="error">${escapeHtml(error)}</div>`;
-  }
-  html += `<form method="post" action="/login">
-<label for="username">Username</label>
-<input type="text" id="username" name="username" autocomplete="username" required>
-<label for="password">Password</label>
-<input type="password" id="password" name="password" autocomplete="current-password" required>`;
-  if (next) {
-    html += `
-<input type="hidden" name="next" value="${escapeHtml(next)}">`;
-  }
-  html += `
-<button type="submit" id="login-btn">Login</button>
-</form>
-</div></body></html>`;
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(html);
-}
-
-function escapeHtml(text) {
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function encodeWorkspaceRoute(dir) {
-  // OpenCode web routes projects as /{base64url(absolutePath)}, not ?directory=.
-  // The query-param form crashes the SPA ("useGlobalSync must be used within GlobalSyncProvider").
-  return Buffer.from(String(dir), "utf8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-function workspaceEntryPath() {
-  // Open Project picker is unreliable on remote servers (empty folder search /
-  // no local recent-projects). Land authenticated users directly in the workspace.
-  return `/${encodeWorkspaceRoute(WORKSPACE)}`;
-}
-
-function shouldAutoOpenWorkspace(req, pathname) {
-  if (req.method !== "GET" && req.method !== "HEAD") return false;
-  if (pathname !== "/") return false;
-  try {
-    const url = new URL(req.url || "/", "http://localhost");
-    // Legacy deep-links; leave them alone (they may still crash — prefer /{base64url}).
-    if (url.searchParams.has("directory") || url.searchParams.has("dir")) return false;
-  } catch {
-    return false;
-  }
-  return process.env.OPENCODE_AUTO_OPEN_WORKSPACE !== "false";
-}
-
-// Create proxy server
-const server = http.createServer((req, res) => {
-  const pathname = req.url?.split("?")[0] || "/";
-  const isPluginReq = PLUGIN_ENDPOINTS.includes(pathname) || PLUGIN_PREFIXES.some(p => pathname.startsWith(p));
-
-  logSleepInbound(req, pathname, isPluginReq ? "plugin" : "");
-
-  // Handle login page
-  if (pathname === "/login") {
-    if (req.method === "GET" || req.method === "HEAD") {
-      let nextPath = "";
-      try {
-        nextPath = new URL(req.url || "/login", "http://localhost").searchParams.get("next") || "";
-      } catch {
-        nextPath = "";
-      }
-      if (req.method === "HEAD") {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end();
-        return;
-      }
-      handleLoginPage(res, undefined, nextPath);
-      return;
-    }
-    if (req.method === "POST") {
-      collectRequestBody(req).then(body => {
-        const form = parseForm(body);
-        const next = safeNextPath(form.next);
-        if (!timingSafeEqual(form.username, USERNAME) || !timingSafeEqual(form.password, PASSWORD)) {
-          handleLoginPage(res, "Invalid username or password.", next);
-          return;
-        }
-        const token = createSessionToken();
-        res.writeHead(302, {
-          "Set-Cookie": sessionCookieValue(token, SESSION_TTL_SECONDS),
-          Location: next || workspaceEntryPath(),
-        });
-        res.end();
-      });
-      return;
-    }
-    res.writeHead(405);
-    res.end();
-    return;
-  }
-
-  // Authenticate
-  if (requestNeedsAuth(pathname, isPluginReq) && !isAuthenticated(req)) {
-    // Browser navigations get the login form; API/XHR keep Basic challenge.
-    if (isHtmlNavigation(req, pathname, isPluginReq)) {
-      res.writeHead(302, { Location: loginRedirectLocation(req) });
-      res.end();
-      return;
-    }
-    res.writeHead(401, {
-      "WWW-Authenticate": `Basic realm="${AUTH_REALM}"`,
-    });
-    res.end();
-    return;
-  }
-
-  touchActivity();
-
-  // Wrapper-owned static patch (allowed by OpenCode CSP script-src 'self').
-  if (pathname === "/__railway/globalsync-patch.js") {
-    res.writeHead(200, {
-      "Content-Type": "application/javascript; charset=utf-8",
-      "Cache-Control": "no-store",
-    });
-    res.end(SPA_CRASH_PATCH_JS);
-    return;
-  }
-
-  // Skip the broken empty "Open project" picker by opening the workspace directly.
-  if (shouldAutoOpenWorkspace(req, pathname)) {
-    res.writeHead(302, { Location: workspaceEntryPath() });
-    res.end();
-    return;
-  }
-
-  if (process.env.DEBUG_PROXY) {
-    console.log(`[proxy] ${req.method} ${req.url}`);
-  }
-
-  const targetPort = isPluginReq ? PLUGIN_PORT : INTERNAL_PORT;
-  proxyRequest(req, res, targetPort);
-});
-
-// WebSocket upgrade handling
-server.on('upgrade', (req, socket, head) => {
-  logSleepInbound(req, pathnameOf(req.url), "upgrade");
-
-  if (!isAuthenticated(req)) {
-    socket.write(`HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="${AUTH_REALM}"\r\nConnection: close\r\n\r\n`);
-    socket.end();
-    return;
-  }
-
-  touchActivity();
-
-  proxyWebSocketUpgrade({
-    req,
-    socket,
-    head,
-    targetPort: INTERNAL_PORT,
-    onError: (err) => {
-      console.error('[websocket error]', err.message);
-    },
-  });
-});
-
-// Start monitor script
-function startMonitor() {
-  const enableMonitor = process.env.ENABLE_MONITOR === "true";
-  if (!enableMonitor) {
-    return;
-  }
-
-  const { spawn } = require("child_process");
-  const fs = require("fs");
-
-  const monitorScript = "/app/monitor.sh";
-
-  if (fs.existsSync(monitorScript)) {
-    fs.chmodSync(monitorScript, 0o755);
-
-    const logStream = fs.createWriteStream("/tmp/opencode_monitor.log", { flags: "a" });
-
-    const monitor = spawn("bash", [monitorScript], {
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    // Only write error-level logs to console; write all logs to file
-    monitor.stdout.on("data", (data) => {
-      logStream.write(data.toString());
-    });
-    monitor.stderr.on("data", (data) => {
-      const lines = data.toString().split("\n");
-      for (const line of lines) {
-        if (line) {
-          console.error("[monitor] " + line);
-          logStream.write("[stderr] " + line + "\n");
-        }
-      }
-    });
-
-    monitor.on("error", (err) => {
-      console.error("[wrapper] Monitor error:", err.message);
-    });
-
-    monitor.unref();
-    fs.writeFileSync("/tmp/opencode_monitor.pid", monitor.pid.toString());
-    console.log("[wrapper] Monitor started");
-  }
-}
 
 // Wait for OpenCode startup
-async function waitForOpencode(timeoutMs = Number(process.env.OPENCODE_START_TIMEOUT_MS || 120000)) {
+async function waitForOpencode(timeoutMs = 30000) {
   const start = Date.now();
-  const authHeader = buildAuthHeader();
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/global/health`, {
-        headers: { "Authorization": authHeader },
-      });
+      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/global/health`);
       if (res.ok) {
         return true;
       }
@@ -779,49 +499,271 @@ function isAuthenticated(req) {
 function sessionCookieValue(token, maxAge) {
   const attrs = [
     `${SESSION_COOKIE}=${token}`,
-    `Max-Age=${maxAge}`,
     "Path=/",
     "HttpOnly",
+    "Secure",
     "SameSite=Lax",
+    `Max-Age=${maxAge}`,
   ];
   return attrs.join("; ");
 }
 
+function setSessionCookie(res) {
+  res.setHeader("Set-Cookie", sessionCookieValue(createSessionToken(), SESSION_TTL_SECONDS));
+}
+
+function clearSessionCookie(res) {
+  res.setHeader("Set-Cookie", sessionCookieValue("", 0));
+}
+
+function sendUnauthorized(res) {
+  res.writeHead(401, {
+    "WWW-Authenticate": `Basic realm="${AUTH_REALM}"`,
+    "Content-Type": "text/plain",
+    "Cache-Control": "no-store",
+  });
+  res.end("Authentication required\n");
+}
+
+function redirect(res, location, statusCode = 302) {
+  res.writeHead(statusCode, {
+    Location: location,
+    "Cache-Control": "no-store",
+  });
+  res.end();
+}
+
+function escapeHtml(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function safeNextPath(value) {
+  if (!value || typeof value !== "string") return "";
+  if (!value.startsWith("/")) return "";
+  if (value.startsWith("//")) return "";
+  if (/^https?:/i.test(value)) return "";
+  if (value === "/login" || value.startsWith("/login?")) return "";
+  return value;
+}
+
+function loginRedirectLocation(req) {
+  const next = safeNextPath(req.url || "/");
+  if (!next || next === "/") return "/login";
+  return `/login?next=${encodeURIComponent(next)}`;
+}
+
+function renderLoginPage(message = "", nextPath = "") {
+  const detail = message
+    ? `<p class="msg">${escapeHtml(message)}</p>`
+    : `<p class="hint">Use the same password you already configured for OpenCode.</p>`;
+  const next = safeNextPath(nextPath);
+  const nextField = next
+    ? `<input type="hidden" name="next" value="${escapeHtml(next)}" />`
+    : "";
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#f6f3ee" />
+    <title>OpenCode Login</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: linear-gradient(160deg, #f6f3ee 0%, #e7dfd3 100%);
+        color: #1f1a17;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      .card {
+        width: min(100%, 420px);
+        background: rgba(255, 252, 247, 0.94);
+        border: 1px solid rgba(71, 57, 46, 0.12);
+        border-radius: 20px;
+        box-shadow: 0 24px 80px rgba(60, 43, 30, 0.14);
+        padding: 28px;
+      }
+      h1 { margin: 0 0 8px; font-size: 28px; }
+      p { margin: 0 0 18px; line-height: 1.5; }
+      .msg { color: #9f2f2f; }
+      .hint { color: #5a4b3f; }
+      label { display: block; margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+      input {
+        width: 100%;
+        margin: 0 0 14px;
+        padding: 12px 14px;
+        border-radius: 12px;
+        border: 1px solid #cbbcab;
+        background: #fffdf9;
+        font-size: 16px;
+      }
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 12px;
+        padding: 12px 14px;
+        background: #1f1a17;
+        color: #fffaf3;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>OpenCode</h1>
+      <p>Browser sessions use a secure cookie. CLI and automation can keep using HTTP Basic Auth.</p>
+      ${detail}
+      <form method="post" action="/login">
+        ${nextField}
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" value="${escapeHtml(USERNAME)}" autocomplete="username" required />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+        <button type="submit">Sign In</button>
+      </form>
+    </main>
+  </body>
+</html>`;
+}
+
 function collectRequestBody(req) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let body = "";
-    req.on("data", (chunk) => { body += chunk; });
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1024 * 1024) {
+        reject(new Error("Request body too large"));
+        req.destroy();
+      }
+    });
     req.on("end", () => resolve(body));
+    req.on("error", reject);
   });
 }
 
 function parseForm(body) {
-  const params = {};
-  if (!body) return params;
-  for (const part of body.split("&")) {
-    const [key, value] = part.split("=");
-    if (key) {
-      params[decodeURIComponent(key)] = decodeURIComponent(value?.replace(/\+/g, " ") || "");
-    }
-  }
-  return params;
+  const params = new URLSearchParams(body);
+  return {
+    username: params.get("username") || "",
+    password: params.get("password") || "",
+    next: params.get("next") || "",
+  };
+}
+
+function pathnameOf(url) {
+  return url.split("?")[0].split("#")[0];
 }
 
 function touchActivity() {
   try {
-    fs.mkdirSync(path.dirname(ACTIVITY_FILE), { recursive: true });
-    fs.writeFileSync(ACTIVITY_FILE, String(Date.now()));
-  } catch {
-    // Best-effort
+    const ts = Math.floor(Date.now() / 1000)
+    if (!Number.isFinite(ts) || ts <= 0) {
+      console.error("[wrapper] Invalid activity timestamp, skipping update")
+      return
+    }
+    fs.mkdirSync(path.dirname(ACTIVITY_FILE), { recursive: true })
+    fs.writeFileSync(ACTIVITY_FILE, String(ts))
+  } catch (err) {
+    console.error(`[wrapper] Failed to update activity file: ${err.message}`)
   }
 }
 
-function pathnameOf(url) {
+function isDirectorySessionRoute(pathname) {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts.length < 2) return false;
+  return parts[1] === "session";
+}
+
+function decodeRouteDirectory(pathname) {
+  if (!isDirectorySessionRoute(pathname)) return;
+  const parts = pathname.split("/").filter(Boolean);
+  const slug = parts[0];
+  if (!slug) return;
   try {
-    return new URL(url, "http://localhost").pathname;
+    return Buffer.from(slug, "base64url").toString("utf8");
   } catch {
-    return url?.split("?")[0] || "/";
+    return;
   }
+}
+
+function hasValidRouteDirectory(pathname) {
+  const dir = decodeRouteDirectory(pathname);
+  if (!dir) return true;
+  if (dir === WORKSPACE) return true;
+  return fs.existsSync(dir);
+}
+
+function routeSessionParts(pathname) {
+  if (!isDirectorySessionRoute(pathname)) return;
+  const parts = pathname.split("/").filter(Boolean);
+  return {
+    slug: parts[0],
+    tail: parts.slice(1),
+  };
+}
+
+function routeSessionLocation(directory, suffix = "/session") {
+  const slug = Buffer.from(directory).toString("base64url");
+  return `/${slug}${suffix}`;
+}
+
+function rootSessionLocation() {
+  return routeSessionLocation(WORKSPACE);
+}
+
+async function listDirectorySessions(directory) {
+  const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/session`, {
+    headers: {
+      "x-opencode-directory": directory,
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) throw new Error(`list sessions failed: ${res.status}`);
+  return await res.json();
+}
+
+async function createDirectorySession(directory) {
+  const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/session`, {
+    method: "POST",
+    headers: {
+      "x-opencode-directory": directory,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(`create session failed: ${res.status}`);
+  return await res.json();
+}
+
+function isStaticAsset(pathname) {
+  return /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|json)$/.test(pathname);
+}
+
+function isHtmlNavigation(req, pathname, isPluginReq) {
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
+  if (isPluginReq) return false;
+  if (isStaticAsset(pathname)) return false;
+  const accept = req.headers.accept || "";
+  if (req.headers["sec-fetch-dest"] === "document") return true;
+  if (req.headers["sec-fetch-mode"] === "navigate") return true;
+  return accept.includes("text/html");
 }
 
 // Plugin endpoint list - these endpoints route to the plugin port
@@ -830,122 +772,448 @@ const PLUGIN_ENDPOINTS = ['/register'];
 const PLUGIN_PREFIXES = ['/register/'];
 const PUBLIC_PATHS = new Set([
   "/favicon.ico",
-  "/login",
-  "/logout",
+  "/favicon-v3.ico",
+  "/favicon-v3.svg",
+  "/favicon-96x96-v3.png",
+  "/apple-touch-icon-v3.png",
+  "/site.webmanifest",
+  "/social-share.png",
+  "/oc-theme-preload.js",
+  "/web-app-manifest-192x192.png",
+  "/web-app-manifest-512x512.png",
 ]);
 
-function extractDirectoryFromURL(rawUrl) {
-  if (!rawUrl) return "";
+// Check whether a request targets a plugin endpoint
+function isPluginEndpoint(url) {
+  const pathname = pathnameOf(url);
+  // Exact match
+  if (PLUGIN_ENDPOINTS.includes(pathname)) return true;
+  // Prefix match
+  if (PLUGIN_PREFIXES.some(prefix => pathname.startsWith(prefix))) return true;
+  return false;
+}
+
+function isPublicPath(pathname) {
+  return PUBLIC_PATHS.has(pathname);
+}
+
+function isStaticRoute(pathname) {
+  if (!sourceMode) return false;
+  if (isPublicPath(pathname)) return true;
+  if (pathname.startsWith("/assets/")) return true;
+  return false;
+}
+
+function shouldTrackActivity(req, pathname, isPluginReq) {
+  if (req.method === "OPTIONS") return false;
+  if (isPluginReq) return false;
+  if (pathname === "/login" || pathname === "/logout") return false;
+  if (pathname === "/global/health") return false;
+  if (pathname === "/global/event" || pathname === "/events") return false;
+  if (pathname === "/session/status") return false;
+  if (isStaticRoute(pathname)) return false;
+  return true;
+}
+
+function staticPath(pathname) {
+  const rel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  const file = path.resolve(WEB_ROOT, rel);
+  if (file === WEB_ROOT) return path.join(WEB_ROOT, "index.html");
+  if (!file.startsWith(WEB_ROOT + path.sep) && file !== path.join(WEB_ROOT, "index.html")) return;
+  return file;
+}
+
+function mimeType(file) {
+  const ext = path.extname(file).toLowerCase();
+  if (ext === ".html") return "text/html; charset=utf-8";
+  if (ext === ".js") return "text/javascript; charset=utf-8";
+  if (ext === ".css") return "text/css; charset=utf-8";
+  if (ext === ".json" || ext === ".webmanifest") return "application/manifest+json; charset=utf-8";
+  if (ext === ".svg") return "image/svg+xml";
+  if (ext === ".png") return "image/png";
+  if (ext === ".ico") return "image/x-icon";
+  if (ext === ".woff2") return "font/woff2";
+  if (ext === ".woff") return "font/woff";
+  if (ext === ".ttf") return "font/ttf";
+  return "application/octet-stream";
+}
+
+function cacheControl(file) {
+  if (file.endsWith("index.html")) return "no-store";
+  return "public, max-age=31536000, immutable";
+}
+
+function sendStatic(res, file, reqMethod = "GET") {
+  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
+  const body = fs.readFileSync(file);
+  res.writeHead(200, {
+    "Content-Type": mimeType(file),
+    "Content-Length": body.length,
+    "Cache-Control": cacheControl(file),
+  });
+  if (reqMethod === "HEAD") {
+    res.end();
+    return true;
+  }
+  res.end(body);
+  return true;
+}
+
+function handleStatic(req, res, pathname) {
+  if (isStaticRoute(pathname)) {
+    return sendStatic(res, staticPath(pathname), req.method);
+  }
+  return false;
+}
+
+function sendMissingStatic(res, pathname) {
+  const status = pathname === "/" ? 500 : 404;
+  const body =
+    pathname === "/"
+      ? `Missing local web app entrypoint: ${staticPath("/")}\n`
+      : `Static asset not found: ${pathname}\n`;
+  res.writeHead(status, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  res.end(body);
+}
+
+function normalizeCspValue(value) {
+  if (!value) return "";
+  return Array.isArray(value) ? value.join("; ") : value;
+}
+
+function appendCspSource(policy, directive, source) {
+  const trimmed = policy.trim();
+  if (!trimmed) return `${directive} ${source}`;
+
+  const parts = trimmed
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const index = parts.findIndex((part) => part === directive || part.startsWith(`${directive} `));
+  if (index === -1) {
+    parts.push(`${directive} ${source}`);
+    return parts.join("; ");
+  }
+
+  const tokens = parts[index].split(/\s+/);
+  if (!tokens.includes(source)) {
+    tokens.push(source);
+    parts[index] = tokens.join(" ");
+  }
+  return parts.join("; ");
+}
+
+function applyCspRelaxation(headers) {
+  const next = { ...headers };
+  let policy = normalizeCspValue(next["content-security-policy"]);
+  if (!policy) return next;
+
+  policy = appendCspSource(policy, "script-src", "https://static.cloudflareinsights.com");
+  policy = appendCspSource(policy, "connect-src", "https://opencode.ai");
+  next["content-security-policy"] = policy;
+  return next;
+}
+
+function handleLoginPage(res, message, nextPath = "") {
+  const body = renderLoginPage(message, nextPath);
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'none'; script-src https://static.cloudflareinsights.com; style-src 'unsafe-inline'; form-action 'self'; img-src 'self' data: https:; base-uri 'none'",
+  });
+  res.end(body);
+}
+
+async function handleLogin(req, res) {
   try {
-    const url = new URL(rawUrl, "http://localhost");
-    return url.searchParams.get("directory") || url.searchParams.get("dir") || "";
+    const body = await collectRequestBody(req);
+    const form = parseForm(body);
+    const next = safeNextPath(form.next);
+    if (!timingSafeEqual(form.username, USERNAME) || !timingSafeEqual(form.password, PASSWORD)) {
+      handleLoginPage(res, "Invalid username or password.", next);
+      return;
+    }
+
+    setSessionCookie(res);
+    // Default to "/" so Lace rootSessionLocation / workspace auto-open still runs.
+    redirect(res, next || "/");
+  } catch (err) {
+    console.error("[auth error]", err.message);
+    res.writeHead(400, {
+      "Content-Type": "text/plain",
+      "Cache-Control": "no-store",
+    });
+    res.end("Bad request\n");
+  }
+}
+
+function extractDirectoryFromURL(urlValue) {
+  if (!urlValue) return;
+  try {
+    const u = new URL(urlValue);
+    return decodeRouteDirectory(u.pathname);
   } catch {
-    return "";
+    return;
   }
 }
 
-function resolveRequestDirectory(req) {
-  const fromUrl = extractDirectoryFromURL(req.url);
-  if (fromUrl) return fromUrl;
-  const fromReferer = extractDirectoryFromURL(req.headers.referer || req.headers.referrer);
-  if (fromReferer) return fromReferer;
-  return WORKSPACE;
-}
+const QUESTION_PATH_RE = /^\/question\/([^/]+)\/(reply|reject)$/;
 
-// OpenCode web 1.14.x can throw "useGlobalSync must be used within GlobalSyncProvider"
-// after opening a project (often on /session). The workspace UI still mounts underneath;
-// dismiss that known overlay so Railway users can actually use the app.
-const SPA_CRASH_PATCH_JS = `(function () {
-  function dismiss() {
+async function resolveQuestionDirectory(referer, origin, requestID) {
+  const fromHeader = extractDirectoryFromURL(referer) || extractDirectoryFromURL(origin);
+
+  if (fromHeader && fs.existsSync(fromHeader)) {
     try {
-      var nodes = document.querySelectorAll("h1");
-      for (var i = 0; i < nodes.length; i++) {
-        if ((nodes[i].textContent || "").indexOf("Something went wrong") === -1) continue;
-        var root = nodes[i];
-        for (var d = 0; d < 10 && root && root.parentElement; d++) {
-          if (root.parentElement.id === "root") break;
-          root = root.parentElement;
+      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/question?directory=${encodeURIComponent(fromHeader)}`);
+      if (res.ok) {
+        const questions = await res.json();
+        if (Array.isArray(questions) && questions.some((q) => q.id === requestID)) {
+          return fromHeader;
         }
-        if (root && root.parentElement) root.remove();
-        return true;
       }
-    } catch (e) {}
-    return false;
+    } catch {}
   }
-  function watch() {
-    dismiss();
-    var body = document.body;
-    if (!body || typeof MutationObserver === "undefined") return;
-    var obs = new MutationObserver(function () { dismiss(); });
-    obs.observe(body, { childList: true, subtree: true });
-    // Keep watching long enough for the SPA to mount the crash overlay.
-    setTimeout(function () { try { obs.disconnect(); } catch (e) {} }, 60000);
-  }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", watch);
-  else watch();
-})();`;
 
-const SPA_CRASH_PATCH_TAG =
-  `<script src="/__railway/globalsync-patch.js" data-oc-railway-patch="globalsync"></script>`;
+  try {
+    const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/question?directory=${encodeURIComponent(WORKSPACE)}`);
+    if (res.ok) {
+      const questions = await res.json();
+      if (Array.isArray(questions) && questions.some((q) => q.id === requestID)) {
+        return WORKSPACE;
+      }
+    }
+  } catch {}
 
-function shouldPatchHtml(req, proxyRes) {
-  if (process.env.OPENCODE_PATCH_GLOBALSYNC === "false") return false;
-  if ((req.method || "GET") !== "GET" && (req.method || "GET") !== "HEAD") return false;
-  const ct = String(proxyRes.headers["content-type"] || "");
-  return ct.includes("text/html");
+  if (fromHeader && fs.existsSync(fromHeader)) return fromHeader;
+
+  console.error(
+    "[wrapper] question reply: cannot determine directory",
+    JSON.stringify({
+      requestID,
+      referer: compactLog(forwardedHeaderValue(referer), 200),
+      origin: compactLog(forwardedHeaderValue(origin), 200),
+      workspace: WORKSPACE,
+    }),
+  );
 }
 
 function proxyRequest(req, res, targetPort) {
-  const forwardHeaders = { ...req.headers, Connection: "close" };
-  // Keep remote web UI scoped to the Railway workspace even when the SPA
-  // forgets to send x-opencode-directory (common on the project picker page).
-  if (!forwardHeaders["x-opencode-directory"]) {
-    forwardHeaders["x-opencode-directory"] = resolveRequestDirectory(req);
+  const forwardHeaders = { ...req.headers };
+  delete forwardHeaders.authorization;
+  delete forwardHeaders.cookie;
+
+  let proxyPath = req.url;
+  if (proxyPath === '/events' || proxyPath.startsWith('/events?')) {
+    proxyPath = proxyPath.replace('/events', '/global/event');
   }
-  // Need plain HTML to inject the GlobalSync crash patch (gzip bodies can't be string-patched).
-  if ((req.method || "GET") === "GET" || (req.method || "GET") === "HEAD") {
-    delete forwardHeaders["accept-encoding"];
-    forwardHeaders["accept-encoding"] = "identity";
+
+  const questionMatch = QUESTION_PATH_RE.exec(pathnameOf(proxyPath));
+  if (questionMatch && !forwardHeaders["x-opencode-directory"]) {
+    const requestID = questionMatch[1];
+    resolveQuestionDirectory(req.headers.referer, req.headers.origin, requestID)
+      .then((dir) => {
+        if (dir) forwardHeaders["x-opencode-directory"] = dir;
+      })
+      .catch(() => {})
+      .finally(() => sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort));
+    return;
   }
+
+  sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort);
+}
+
+function sendProxyRequest(req, res, forwardHeaders, proxyPath, targetPort) {
 
   const options = {
     hostname: "127.0.0.1",
     port: targetPort,
-    path: req.url,
+    path: proxyPath,
     method: req.method,
     headers: forwardHeaders,
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
-    if (!shouldPatchHtml(req, proxyRes)) {
-      res.writeHead(proxyRes.statusCode, proxyRes.headers);
-      proxyRes.pipe(res);
-      return;
-    }
-
-    const chunks = [];
-    proxyRes.on("data", (chunk) => chunks.push(chunk));
-    proxyRes.on("end", () => {
-      let html = Buffer.concat(chunks).toString("utf8");
-      if (html.includes("</body>") && !html.includes('data-oc-railway-patch="globalsync"')) {
-        html = html.replace("</body>", `${SPA_CRASH_PATCH_TAG}</body>`);
-      }
-      const out = Buffer.from(html, "utf8");
-      const headers = { ...proxyRes.headers, "content-length": String(out.length) };
-      delete headers["content-encoding"];
-      delete headers["transfer-encoding"];
-      res.writeHead(proxyRes.statusCode, headers);
-      res.end(out);
-    });
+    res.writeHead(proxyRes.statusCode, applyCspRelaxation(proxyRes.headers));
+    proxyRes.pipe(res);
   });
 
   proxyReq.on("error", (err) => {
-    console.error(`[proxy] Error proxying to port ${targetPort}:`, err.message);
-    res.writeHead(502);
-    res.end();
+    console.error("[proxy error]", err.message);
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "text/plain" });
+      res.end("Gateway error\n");
+    }
   });
 
   req.pipe(proxyReq);
+}
+
+// Create proxy server
+const server = http.createServer(async (req, res) => {
+  const pathname = pathnameOf(req.url);
+  const isPluginReq = isPluginEndpoint(req.url);
+
+  if (shouldLogSleepInbound(req, pathname, isPluginReq)) {
+    logSleepInbound(req, pathname);
+  }
+
+  if (pathname === "/login" && (req.method === "GET" || req.method === "HEAD")) {
+    let nextPath = "";
+    try {
+      nextPath = new URL(req.url || "/login", "http://localhost").searchParams.get("next") || "";
+    } catch {
+      nextPath = "";
+    }
+    if (req.method === "HEAD") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end();
+      return;
+    }
+    handleLoginPage(res, undefined, nextPath);
+    return;
+  }
+
+  if (pathname === "/login" && req.method === "POST") {
+    await handleLogin(req, res);
+    return;
+  }
+
+  if (pathname === "/logout" && (req.method === "POST" || req.method === "GET")) {
+    clearSessionCookie(res);
+    redirect(res, "/login");
+    return;
+  }
+
+  if (handleStatic(req, res, pathname)) return;
+  if (isStaticRoute(pathname)) {
+    sendMissingStatic(res, pathname);
+    return;
+  }
+
+  // Auth before missing-route redirect so unauthenticated browsers land on /login?next=...
+  // instead of bouncing through the workspace slug first.
+  if (!isAuthenticated(req)) {
+    if (isHtmlNavigation(req, pathname, isPluginReq)) {
+      redirect(res, loginRedirectLocation(req));
+      return;
+    }
+    sendUnauthorized(res);
+    return;
+  }
+
+  if (isHtmlNavigation(req, pathname, isPluginReq) && !hasValidRouteDirectory(pathname)) {
+    console.warn(`[wrapper] Missing route directory for ${pathname}, redirecting to workspace root`);
+    redirect(res, rootSessionLocation());
+    return;
+  }
+
+  if (shouldTrackActivity(req, pathname, isPluginReq)) {
+    touchActivity();
+  }
+
+  if (isHtmlNavigation(req, pathname, isPluginReq)) {
+    const route = routeSessionParts(pathname);
+    const directory = decodeRouteDirectory(pathname);
+    if (route && directory && route.tail.length === 1 && route.tail[0] === "session" && fs.existsSync(directory)) {
+      try {
+        const sessions = await listDirectorySessions(directory);
+        if (sessions.length === 0) {
+          const session = await createDirectorySession(directory);
+          const location = routeSessionLocation(directory, `/session/${session.id}`);
+          console.log(`[wrapper] Created session ${session.id} for ${directory}`);
+          redirect(res, location);
+          return;
+        }
+      } catch (err) {
+        console.error(`[wrapper] Failed to auto-create session for ${directory}: ${err.message}`);
+      }
+    }
+    if (sendStatic(res, staticPath("/"), req.method)) {
+      return;
+    }
+    sendMissingStatic(res, "/");
+    return;
+  }
+
+  if (process.env.DEBUG_PROXY) {
+    console.log(`[proxy] ${req.method} ${req.url}`);
+  }
+
+  const targetPort = isPluginReq ? PLUGIN_PORT : INTERNAL_PORT;
+  proxyRequest(req, res, targetPort);
+});
+
+// WebSocket upgrade handling
+server.on('upgrade', (req, socket, head) => {
+  logSleepInbound(req, pathnameOf(req.url), "upgrade");
+
+  if (!isAuthenticated(req)) {
+    socket.write(`HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="${AUTH_REALM}"\r\nConnection: close\r\n\r\n`);
+    socket.end();
+    return;
+  }
+
+  touchActivity();
+
+  proxyWebSocketUpgrade({
+    req,
+    socket,
+    head,
+    targetPort: INTERNAL_PORT,
+    onError: (err) => {
+      console.error('[websocket error]', err.message);
+    },
+  });
+});
+
+// Start monitor script
+function startMonitor() {
+  const enableMonitor = process.env.ENABLE_MONITOR === "true";
+  if (!enableMonitor) {
+    return;
+  }
+
+  const { spawn } = require("child_process");
+  const fs = require("fs");
+
+  const monitorScript = "/app/monitor.sh";
+
+  if (fs.existsSync(monitorScript)) {
+    fs.chmodSync(monitorScript, 0o755);
+
+    const logStream = fs.createWriteStream("/tmp/opencode_monitor.log", { flags: "a" });
+
+    const monitor = spawn("bash", [monitorScript], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    // Only write error-level logs to console; write all logs to file
+    monitor.stdout.on("data", (data) => {
+      logStream.write(data.toString());
+    });
+    monitor.stderr.on("data", (data) => {
+      const lines = data.toString().split("\n");
+      for (const line of lines) {
+        if (line) {
+          console.error("[monitor] " + line);
+          logStream.write("[stderr] " + line + "\n");
+        }
+      }
+    });
+
+    monitor.on("error", (err) => {
+      console.error("[wrapper] Monitor error:", err.message);
+    });
+
+    monitor.unref();
+    fs.writeFileSync("/tmp/opencode_monitor.pid", monitor.pid.toString());
+    console.log("[wrapper] Monitor started");
+  }
 }
 
 // Start server
