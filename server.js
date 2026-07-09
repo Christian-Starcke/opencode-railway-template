@@ -464,6 +464,25 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
+function workspaceEntryPath() {
+  // OpenCode web's "Open project" dialog is unreliable on remote servers
+  // (empty folder search). Land authenticated users in the configured workspace.
+  const dir = encodeURIComponent(WORKSPACE);
+  return `/?directory=${dir}`;
+}
+
+function shouldAutoOpenWorkspace(req, pathname) {
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
+  if (pathname !== "/") return false;
+  try {
+    const url = new URL(req.url || "/", "http://localhost");
+    if (url.searchParams.has("directory") || url.searchParams.has("dir")) return false;
+  } catch {
+    return false;
+  }
+  return process.env.OPENCODE_AUTO_OPEN_WORKSPACE !== "false";
+}
+
 // Create proxy server
 const server = http.createServer((req, res) => {
   const pathname = req.url?.split("?")[0] || "/";
@@ -487,7 +506,7 @@ const server = http.createServer((req, res) => {
         const token = createSessionToken();
         res.writeHead(302, {
           "Set-Cookie": sessionCookieValue(token, SESSION_TTL_SECONDS),
-          Location: "/",
+          Location: workspaceEntryPath(),
         });
         res.end();
       });
@@ -508,6 +527,13 @@ const server = http.createServer((req, res) => {
   }
 
   touchActivity();
+
+  // Skip the broken empty "Open project" picker by opening the workspace directly.
+  if (shouldAutoOpenWorkspace(req, pathname)) {
+    res.writeHead(302, { Location: workspaceEntryPath() });
+    res.end();
+    return;
+  }
 
   if (process.env.DEBUG_PROXY) {
     console.log(`[proxy] ${req.method} ${req.url}`);
@@ -746,13 +772,38 @@ const PUBLIC_PATHS = new Set([
   "/logout",
 ]);
 
+function extractDirectoryFromURL(rawUrl) {
+  if (!rawUrl) return "";
+  try {
+    const url = new URL(rawUrl, "http://localhost");
+    return url.searchParams.get("directory") || url.searchParams.get("dir") || "";
+  } catch {
+    return "";
+  }
+}
+
+function resolveRequestDirectory(req) {
+  const fromUrl = extractDirectoryFromURL(req.url);
+  if (fromUrl) return fromUrl;
+  const fromReferer = extractDirectoryFromURL(req.headers.referer || req.headers.referrer);
+  if (fromReferer) return fromReferer;
+  return WORKSPACE;
+}
+
 function proxyRequest(req, res, targetPort) {
+  const forwardHeaders = { ...req.headers, Connection: "close" };
+  // Keep remote web UI scoped to the Railway workspace even when the SPA
+  // forgets to send x-opencode-directory (common on the project picker page).
+  if (!forwardHeaders["x-opencode-directory"]) {
+    forwardHeaders["x-opencode-directory"] = resolveRequestDirectory(req);
+  }
+
   const options = {
     hostname: "127.0.0.1",
     port: targetPort,
     path: req.url,
     method: req.method,
-    headers: { ...req.headers, Connection: "close" },
+    headers: forwardHeaders,
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
