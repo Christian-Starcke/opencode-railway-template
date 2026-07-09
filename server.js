@@ -814,7 +814,6 @@ function resolveRequestDirectory(req) {
 // after opening a project (often on /session). The workspace UI still mounts underneath;
 // dismiss that known overlay so Railway users can actually use the app.
 const SPA_CRASH_PATCH_JS = `(function () {
-  var NEEDLE = "useGlobalSync must be used within GlobalSyncProvider";
   function dismiss() {
     try {
       var nodes = document.querySelectorAll("h1");
@@ -832,14 +831,13 @@ const SPA_CRASH_PATCH_JS = `(function () {
     return false;
   }
   function watch() {
-    if (dismiss()) return;
+    dismiss();
     var body = document.body;
     if (!body || typeof MutationObserver === "undefined") return;
-    var obs = new MutationObserver(function () {
-      if ((document.body && document.body.innerText || "").indexOf(NEEDLE) !== -1) dismiss();
-    });
+    var obs = new MutationObserver(function () { dismiss(); });
     obs.observe(body, { childList: true, subtree: true });
-    setTimeout(function () { try { obs.disconnect(); } catch (e) {} }, 15000);
+    // Keep watching long enough for the SPA to mount the crash overlay.
+    setTimeout(function () { try { obs.disconnect(); } catch (e) {} }, 60000);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", watch);
   else watch();
