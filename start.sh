@@ -61,6 +61,32 @@ if [ "${OPENCODE_CLEANUP_DIRS:-}" = "true" ]; then
   } >> "$CLEANUP_LOG" 2>&1 || true
 fi
 
+# One-shot: reset OpenCode SQLite DB (keeps workspace repos).
+# Needed when a newer OpenCode migrated the DB (e.g. session_message.seq)
+# and an older runtime like v1.14.x cannot write prompts.
+# Set OPENCODE_RESET_DB=true for one deploy, then delete the variable.
+if [ "${OPENCODE_RESET_DB:-}" = "true" ]; then
+  mkdir -p /data/logs /data/.local/share/opencode/backups
+  RESET_LOG="/data/logs/reset-opencode-db.log"
+  {
+    echo "[reset-db] $(date -u +%Y-%m-%dT%H:%M:%SZ) starting"
+    DB_DIR="/data/.local/share/opencode"
+    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    for f in "${DB_DIR}"/opencode.db "${DB_DIR}"/opencode.db-wal "${DB_DIR}"/opencode.db-shm; do
+      if [ -e "$f" ]; then
+        base="$(basename "$f")"
+        echo "[reset-db] backing up $f -> ${DB_DIR}/backups/${base}.${STAMP}"
+        cp -a "$f" "${DB_DIR}/backups/${base}.${STAMP}" || true
+        echo "[reset-db] removing $f"
+        rm -f "$f"
+      else
+        echo "[reset-db] skip missing $f"
+      fi
+    done
+    echo "[reset-db] done — delete OPENCODE_RESET_DB after this deploy"
+  } >> "$RESET_LOG" 2>&1 || true
+fi
+
 # Update globally installed skills on each deploy (enabled by default)
 # Set SKILLS_UPDATE_ON_START=false to disable
 if [ "${SKILLS_UPDATE_ON_START:-true}" != "false" ]; then
