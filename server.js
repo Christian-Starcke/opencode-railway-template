@@ -464,11 +464,20 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
+function encodeWorkspaceRoute(dir) {
+  // OpenCode web routes projects as /{base64url(absolutePath)}, not ?directory=.
+  // The query-param form crashes the SPA ("useGlobalSync must be used within GlobalSyncProvider").
+  return Buffer.from(String(dir), "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
 function workspaceEntryPath() {
-  // OpenCode web's "Open project" dialog is unreliable on remote servers
-  // (empty folder search). Land authenticated users in the configured workspace.
-  const dir = encodeURIComponent(WORKSPACE);
-  return `/?directory=${dir}`;
+  // Open Project picker is unreliable on remote servers (empty folder search /
+  // no local recent-projects). Land authenticated users directly in the workspace.
+  return `/${encodeWorkspaceRoute(WORKSPACE)}`;
 }
 
 function shouldAutoOpenWorkspace(req, pathname) {
@@ -476,6 +485,7 @@ function shouldAutoOpenWorkspace(req, pathname) {
   if (pathname !== "/") return false;
   try {
     const url = new URL(req.url || "/", "http://localhost");
+    // Legacy deep-links; leave them alone (they may still crash — prefer /{base64url}).
     if (url.searchParams.has("directory") || url.searchParams.has("dir")) return false;
   } catch {
     return false;
