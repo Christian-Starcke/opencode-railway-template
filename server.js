@@ -623,7 +623,7 @@ function startMonitor() {
 }
 
 // Wait for OpenCode startup
-async function waitForOpencode(timeoutMs = 30000) {
+async function waitForOpencode(timeoutMs = Number(process.env.OPENCODE_START_TIMEOUT_MS || 120000)) {
   const start = Date.now();
   const authHeader = buildAuthHeader();
   while (Date.now() - start < timeoutMs) {
