@@ -12,6 +12,19 @@ if [ -n "${PREPEND_PATH:-}" ]; then
   export PATH="${PREPEND_PATH}:${PATH}"
 fi
 
+# Orchestrator P1 — checkout user repo when ORCHESTRATOR_CHECKOUT_URL is set.
+# Align OpenCode cwd env names (template uses OPENCODE_WORKSPACE; Orchestrator injects PATH).
+CHECKOUT_PATH="${ORCHESTRATOR_CHECKOUT_PATH:-${OPENCODE_WORKSPACE:-${OPENCODE_WORKSPACE_PATH:-/data/workspace}}}"
+export OPENCODE_WORKSPACE="${CHECKOUT_PATH}"
+export OPENCODE_WORKSPACE_PATH="${CHECKOUT_PATH}"
+if [ -n "${ORCHESTRATOR_CHECKOUT_URL:-}" ]; then
+  if [ -f /app/orchestrator-checkout.sh ]; then
+    sh /app/orchestrator-checkout.sh
+  else
+    echo "[orch-checkout] WARNING: ORCHESTRATOR_CHECKOUT_URL set but /app/orchestrator-checkout.sh missing"
+  fi
+fi
+
 # One-shot flatten: remove nested .git clones under /data/workspace (SSH unreliable).
 # Set OPENCODE_FLATTEN_WORKSPACE=true for one deploy, then delete the variable.
 if [ "${OPENCODE_FLATTEN_WORKSPACE:-}" = "true" ]; then
