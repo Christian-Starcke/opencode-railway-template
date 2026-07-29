@@ -399,17 +399,52 @@ opencode.on("exit", (code, signal) => {
 
 // Wait for OpenCode startup
 async function waitForOpencode(timeoutMs = Number(process.env.OPENCODE_START_TIMEOUT_MS || 30000)) {
+  const net = require("net");
   const start = Date.now();
+  const probeMs = Number(process.env.OPENCODE_HEALTH_PROBE_TIMEOUT_MS || 2000);
+  let portOpenSince = null;
+
+  const portOpen = () =>
+    new Promise((resolve) => {
+      const socket = net.connect(
+        { host: "127.0.0.1", port: Number(INTERNAL_PORT) },
+        () => {
+          socket.end();
+          resolve(true);
+        }
+      );
+      socket.setTimeout(500, () => {
+        socket.destroy();
+        resolve(false);
+      });
+      socket.on("error", () => resolve(false));
+    });
+
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/global/health`);
+      const res = await fetch(`http://127.0.0.1:${INTERNAL_PORT}/global/health`, {
+        signal: AbortSignal.timeout(probeMs),
+      });
       if (res.ok) {
         return true;
       }
-    } catch {
-      // Not ready yet
+      console.log(`[wrapper] health probe HTTP ${res.status}`);
+    } catch (err) {
+      // Not ready yet, or health hung past probeMs (AbortError)
     }
-    await new Promise(r => setTimeout(r, 100));
+
+    if (await portOpen()) {
+      if (!portOpenSince) portOpenSince = Date.now();
+      // Health can hang after listen (DB/migrations); open port for 3s is enough.
+      if (Date.now() - portOpenSince >= 3000) {
+        console.log("[wrapper] INTERNAL_PORT open; proceeding without healthy /global/health");
+        return true;
+      }
+    } else {
+      portOpenSince = null;
+    }
+
+    await new Promise((r) => setTimeout(r, 250));
   }
   return false;
 }
