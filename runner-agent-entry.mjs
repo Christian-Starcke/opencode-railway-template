@@ -34,7 +34,8 @@ let cachedSessionId = process.env.ORCHESTRATOR_OPENCODE_SESSION_ID || null
 function runtimeBase() {
   const explicit = (process.env.RUNTIME_URL || '').replace(/\/$/, '')
   if (explicit) return explicit
-  const port = process.env.PORT || '4096'
+  // opencode-railway-template: public PORT is the wrapper; OpenCode is on INTERNAL_PORT.
+  const port = process.env.INTERNAL_PORT || process.env.OPENCODE_INTERNAL_PORT || '18080'
   return `http://127.0.0.1:${port}`
 }
 
@@ -108,6 +109,7 @@ async function waitForOpenCode(base, auth, maxMs = 180000) {
     try {
       const res = await fetch(`${base}/global/health`, {
         headers: auth ? { Authorization: auth } : {},
+        signal: AbortSignal.timeout(5000),
       })
       if (res.ok) return true
     } catch {
@@ -127,6 +129,7 @@ async function ensureOpenCodeSession(base, auth) {
       ...(auth ? { Authorization: auth } : {}),
     },
     body: JSON.stringify({ title: workspaceId }),
+    signal: AbortSignal.timeout(60000),
   })
   if (!res.ok) {
     throw new Error(`session create ${res.status}`)
@@ -196,6 +199,9 @@ async function driveOpenCodeTurn(pending) {
           parts: [{ type: 'text', text: userContent }],
           agent: process.env.OPENCODE_MODE || 'build',
         }),
+        signal: AbortSignal.timeout(
+          Number(process.env.ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS || 240000)
+        ),
       }
     )
     const data = await res.json().catch(() => ({}))
