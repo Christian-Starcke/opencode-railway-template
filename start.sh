@@ -126,8 +126,9 @@ if [ -n "${ORCHESTRATOR_RUNNER_TOKEN:-}" ] && [ -n "${ORCHESTRATOR_API_URL:-}" ]
   fi
   if [ "$STARTED" = "1" ]; then
     export ORCHESTRATOR_AGENT="${ORCHESTRATOR_AGENT:-opencode}"
-    if [ -z "${RUNTIME_URL:-}" ] && [ -n "${PORT:-}" ]; then
-      export RUNTIME_URL="http://127.0.0.1:${PORT}"
+    if [ -z "${RUNTIME_URL:-}" ]; then
+      # Public PORT is the wrapper; OpenCode listens on INTERNAL_PORT (default 18080).
+      export RUNTIME_URL="http://127.0.0.1:${INTERNAL_PORT:-18080}"
     fi
     nohup node "$AGENT_JS" >> /data/logs/runner-agent.log 2>&1 &
     echo "[runner-agent] started pid=$! log=/data/logs/runner-agent.log"
