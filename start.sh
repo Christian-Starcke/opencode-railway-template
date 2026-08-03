@@ -107,4 +107,24 @@ if [ "${SKILLS_UPDATE_ON_START:-true}" != "false" ]; then
   npx skills update -g 2>&1 || echo "[skills] WARNING: Skills update failed, continuing anyway..."
 fi
 
+# R3 — Orchestrator runner-agent sidecar (heartbeat + pending → harness → CP ingest).
+# Bootstrapped when provision injects ORCHESTRATOR_RUNNER_TOKEN + ORCHESTRATOR_API_URL.
+# Downloads entry from CP so the agent script stays source-of-truth in Orchestrator.
+if [ -n "${ORCHESTRATOR_RUNNER_TOKEN:-}" ] && [ -n "${ORCHESTRATOR_API_URL:-}" ]; then
+  mkdir -p /data/logs
+  AGENT_JS="${ORCHESTRATOR_AGENT_PATH:-/data/runner-agent-entry.mjs}"
+  BOOTSTRAP_URL="${ORCHESTRATOR_API_URL%/}/api/runner/bootstrap"
+  if curl -fsS -m 45 "$BOOTSTRAP_URL" -o "$AGENT_JS"; then
+    export ORCHESTRATOR_AGENT="${ORCHESTRATOR_AGENT:-opencode}"
+    # Prefer loopback; Railway sets PORT for the OpenCode wrapper.
+    if [ -z "${RUNTIME_URL:-}" ] && [ -n "${PORT:-}" ]; then
+      export RUNTIME_URL="http://127.0.0.1:${PORT}"
+    fi
+    nohup node "$AGENT_JS" >> /data/logs/runner-agent.log 2>&1 &
+    echo "[runner-agent] started pid=$! log=/data/logs/runner-agent.log from $BOOTSTRAP_URL"
+  else
+    echo "[runner-agent] WARNING: bootstrap download failed ($BOOTSTRAP_URL); continuing without sidecar"
+  fi
+fi
+
 exec node /app/server.js
