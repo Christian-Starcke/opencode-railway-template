@@ -1,0 +1,12 @@
+{
+  "setup": [
+    "sh",
+    "-c",
+    "mkdir -p .orch && printf 'R3_SETUP_OK\\n' > .orch-r3-setup-ok"
+  ],
+  "archive": [
+    "sh",
+    "-c",
+    "printf 'R3_ARCHIVE_OK\\n' > /tmp/orch-r3-archive-ok"
+  ]
+}
