@@ -1,11 +1,20 @@
 #!/usr/bin/env node
 /**
- * R3.1 â€” thin runner-agent entry for managed VMs.
+ * R3.1 — thin runner-agent entry for managed VMs.
  * Expects ORCHESTRATOR_API_URL, ORCHESTRATOR_RUNNER_TOKEN, ORCHESTRATOR_WORKSPACE_ID.
  *
- * Loop: heartbeat â†’ poll pending â†’ (OpenCode) drive local harness â†’ CP ingest.
+ * Loop: heartbeat → poll pending → (OpenCode) drive local harness → CP ingest.
  * Served to VMs via GET /api/runner/bootstrap (start.sh curls this when token set).
+ * R3.1b: authenticated shell PTY WebSocket on 127.0.0.1:ORCHESTRATOR_PTY_PORT.
  */
+import {
+  createHash,
+  randomBytes,
+  timingSafeEqual as cryptoTimingSafeEqual,
+} from 'node:crypto'
+import { createServer } from 'node:http'
+import { spawn } from 'node:child_process'
+
 const apiUrl = (process.env.ORCHESTRATOR_API_URL || '').replace(/\/$/, '')
 const token = process.env.ORCHESTRATOR_RUNNER_TOKEN || ''
 const workspaceId = process.env.ORCHESTRATOR_WORKSPACE_ID || ''
@@ -46,20 +55,109 @@ function openCodeAuthHeader() {
   return 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64')
 }
 
+/** Keep in sync with src/lib/harness-stream.ts OpenCode extract helpers. */
+function asRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value
+}
+
+function pickOpenCodeAssistantMessage(data) {
+  if (data == null) return null
+  if (Array.isArray(data)) {
+    for (let i = data.length - 1; i >= 0; i--) {
+      const row = asRecord(data[i])
+      if (!row) continue
+      const info = asRecord(row.info)
+      if (info && info.role === 'assistant') return row
+    }
+    for (let i = data.length - 1; i >= 0; i--) {
+      const row = asRecord(data[i])
+      if (!row || !Array.isArray(row.parts)) continue
+      const info = asRecord(row.info)
+      if (info && info.role === 'user') continue
+      return row
+    }
+    return null
+  }
+  const root = asRecord(data)
+  if (!root) return null
+  if ('data' in root && root.data !== undefined) {
+    const nested = pickOpenCodeAssistantMessage(root.data)
+    if (nested) return nested
+  }
+  if (Array.isArray(root.messages)) {
+    const nested = pickOpenCodeAssistantMessage(root.messages)
+    if (nested) return nested
+  }
+  if (Array.isArray(root.parts) || root.info) {
+    const info = asRecord(root.info)
+    if (info && info.role === 'user') return null
+    return root
+  }
+  return null
+}
+
 function extractOpenCodeText(data) {
-  if (!data || typeof data !== 'object') return ''
-  const parts = data.parts
-  if (!Array.isArray(parts)) return ''
-  return parts
-    .filter(
-      (p) =>
-        p &&
-        typeof p === 'object' &&
-        p.type === 'text' &&
-        typeof p.text === 'string'
-    )
-    .map((p) => p.text)
+  const message = pickOpenCodeAssistantMessage(data)
+  if (!message || !Array.isArray(message.parts)) return ''
+  return message.parts
+    .map((p) => {
+      const part = asRecord(p)
+      if (!part || part.type !== 'text') return ''
+      if (typeof part.text === 'string') return part.text
+      if (typeof part.content === 'string') return part.content
+      return ''
+    })
+    .filter(Boolean)
     .join('')
+}
+
+function extractOpenCodeError(data) {
+  const message = pickOpenCodeAssistantMessage(data)
+  const info = asRecord(message && message.info)
+  if (!info) return ''
+  const err = info.error
+  if (typeof err === 'string' && err.trim()) return err.trim()
+  const obj = asRecord(err)
+  if (!obj) return ''
+  const nested = asRecord(obj.data)
+  const detail =
+    (typeof obj.message === 'string' && obj.message.trim()) ||
+    (nested && typeof nested.message === 'string' && nested.message.trim()) ||
+    (typeof obj.data === 'string' && obj.data.trim()) ||
+    ''
+  const name =
+    typeof obj.name === 'string' && obj.name.trim() ? obj.name.trim() : ''
+  if (name && detail) return `${name}: ${detail}`
+  if (detail) return detail
+  if (name) {
+    try {
+      const rest = JSON.stringify(obj)
+      if (rest && rest !== '{}' && rest !== `{"name":"${name}"}`) {
+        return `${name} ${rest}`.slice(0, 400)
+      }
+    } catch {
+      /* ignore */
+    }
+    return name
+  }
+  try {
+    return JSON.stringify(obj)
+  } catch {
+    return ''
+  }
+}
+
+async function fetchOpenCodeMessageList(base, auth, sessionId) {
+  const res = await fetch(
+    `${base}/session/${encodeURIComponent(sessionId)}/message`,
+    {
+      headers: auth ? { Authorization: auth } : {},
+      signal: AbortSignal.timeout(60000),
+    }
+  )
+  if (!res.ok) return null
+  return res.json().catch(() => null)
 }
 
 function extractSessionId(data) {
@@ -198,21 +296,85 @@ async function driveOpenCodeTurn(pending) {
         body: JSON.stringify({
           parts: [{ type: 'text', text: userContent }],
           agent: process.env.OPENCODE_MODE || 'build',
+          // Managed OpenCode often runs DeepSeek via OpenRouter, which rejects
+          // tool-use ("No endpoints found that support tool use"). Deny the
+          // build-agent tool surface so text turns still complete. Set
+          // ORCHESTRATOR_AGENT_ALLOW_TOOLS=1 to keep tools enabled.
+          ...(process.env.ORCHESTRATOR_AGENT_ALLOW_TOOLS === '1'
+            ? {}
+            : {
+                tools: {
+                  bash: false,
+                  edit: false,
+                  write: false,
+                  read: false,
+                  glob: false,
+                  grep: false,
+                  list: false,
+                  task: false,
+                  webfetch: false,
+                  websearch: false,
+                  lsp: false,
+                  skill: false,
+                  question: false,
+                  todowrite: false,
+                  apply_patch: false,
+                },
+              }),
         }),
         signal: AbortSignal.timeout(
           Number(process.env.ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS || 240000)
         ),
       }
     )
-    const data = await res.json().catch(() => ({}))
+    // OpenCode can return HTTP 200 with an empty body when `agent` resolution
+    // fails silently — parse text first, then fall back to GET message list.
+    const raw = await res.text().catch(() => '')
+    let data = {}
+    if (raw.trim()) {
+      try {
+        data = JSON.parse(raw)
+      } catch {
+        data = {}
+      }
+    }
     if (!res.ok) {
       throw new Error(
-        typeof data.error === 'string'
-          ? data.error
-          : `OpenCode message HTTP ${res.status}`
+        (data && typeof data.error === 'string' && data.error) ||
+          raw.slice(0, 240) ||
+          `OpenCode message HTTP ${res.status}`
       )
     }
-    const content = extractOpenCodeText(data) || '(empty assistant response)'
+
+    let content = extractOpenCodeText(data)
+    let errMsg = extractOpenCodeError(data)
+    if (!content.trim()) {
+      const listed = await fetchOpenCodeMessageList(base, auth, sessionId)
+      if (listed) {
+        content = extractOpenCodeText(listed)
+        if (!errMsg) errMsg = extractOpenCodeError(listed)
+        if (content.trim()) {
+          console.log(
+            'runner-agent: recovered assistant text from message list',
+            attemptId,
+            `${content.length} chars`
+          )
+        }
+      }
+    }
+
+    if (!content.trim() && errMsg) {
+      throw new Error(errMsg)
+    }
+    if (!content.trim()) {
+      const preview = raw.trim().slice(0, 240)
+      throw new Error(
+        preview
+          ? `OpenCode returned no assistant text parts body=${preview}`
+          : 'OpenCode returned empty message body (no assistant text)'
+      )
+    }
+
     await pushIngest({
       agent: 'opencode',
       messageId,
@@ -274,13 +436,281 @@ async function pollPending() {
   )
 }
 
+// --- R3.1b: authenticated interactive shell PTY over WebSocket -------------
+// Listens on 127.0.0.1:ORCHESTRATOR_PTY_PORT (default 19090). The Railway
+// wrapper proxies public `/orch/pty` upgrades here. Auth = Bearer runner token.
+const ptyPort = Number(process.env.ORCHESTRATOR_PTY_PORT || 19090)
+const ptyEnabled = process.env.ORCHESTRATOR_AGENT_PTY !== '0'
+
+function timingSafeEqualStr(a, b) {
+  const ab = Buffer.from(String(a || ''), 'utf8')
+  const bb = Buffer.from(String(b || ''), 'utf8')
+  if (ab.length !== bb.length) return false
+  return cryptoTimingSafeEqual(ab, bb)
+}
+
+function authorizePtyRequest(req) {
+  // Wrapper already requires Basic; this second factor is the runner token or
+  // the OpenCode server password (smoke has the latter via runtime_auth decrypt
+  // without rotating the in-VM runner token).
+  const openCodePass = process.env.OPENCODE_SERVER_PASSWORD || ''
+  const candidates = [token, openCodePass].filter((v) => v && String(v).length > 0)
+  const auth = String(req.headers.authorization || '')
+  if (auth.startsWith('Bearer ')) {
+    const presented = auth.slice(7).trim()
+    return candidates.some((c) => timingSafeEqualStr(presented, c))
+  }
+  try {
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    const q = u.searchParams.get('token') || ''
+    return candidates.some((c) => timingSafeEqualStr(q, c))
+  } catch {
+    return false
+  }
+}
+
+function wsAcceptKey(secKey) {
+  return createHash('sha1')
+    .update(secKey + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', 'binary')
+    .digest('base64')
+}
+
+function wsSendText(socket, text) {
+  const payload = Buffer.from(text, 'utf8')
+  const len = payload.length
+  let header
+  if (len < 126) {
+    header = Buffer.alloc(2)
+    header[0] = 0x81
+    header[1] = len
+  } else if (len < 65536) {
+    header = Buffer.alloc(4)
+    header[0] = 0x81
+    header[1] = 126
+    header.writeUInt16BE(len, 2)
+  } else {
+    header = Buffer.alloc(10)
+    header[0] = 0x81
+    header[1] = 127
+    header.writeUInt32BE(0, 2)
+    header.writeUInt32BE(len, 6)
+  }
+  socket.write(Buffer.concat([header, payload]))
+}
+
+function attachWsReader(socket, onText) {
+  let buf = Buffer.alloc(0)
+  socket.on('data', (chunk) => {
+    buf = Buffer.concat([buf, chunk])
+    while (buf.length >= 2) {
+      const finOpcode = buf[0]
+      const opcode = finOpcode & 0x0f
+      const masked = (buf[1] & 0x80) !== 0
+      let payloadLen = buf[1] & 0x7f
+      let offset = 2
+      if (payloadLen === 126) {
+        if (buf.length < 4) return
+        payloadLen = buf.readUInt16BE(2)
+        offset = 4
+      } else if (payloadLen === 127) {
+        if (buf.length < 10) return
+        payloadLen = Number(buf.readBigUInt64BE(2))
+        offset = 10
+      }
+      const maskLen = masked ? 4 : 0
+      const total = offset + maskLen + payloadLen
+      if (buf.length < total) return
+      let payload = buf.subarray(offset + maskLen, total)
+      if (masked) {
+        const mask = buf.subarray(offset, offset + 4)
+        payload = Buffer.from(payload)
+        for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4]
+      }
+      buf = buf.subarray(total)
+      if (opcode === 0x8) {
+        socket.end()
+        return
+      }
+      if (opcode === 0x9) {
+        // ping → pong
+        const pong = Buffer.alloc(2 + payload.length)
+        pong[0] = 0x8a
+        pong[1] = payload.length
+        payload.copy(pong, 2)
+        socket.write(pong)
+        continue
+      }
+      if (opcode === 0x1) onText(payload.toString('utf8'))
+    }
+  })
+}
+
+function spawnShellPty() {
+  // util-linux/bsdutils `script` allocates a real PTY (not Phase 5 one-shot).
+  const shell = process.env.ORCHESTRATOR_PTY_SHELL || 'bash -l'
+  const child = spawn('script', ['-qfc', shell, '/dev/null'], {
+    env: { ...process.env, TERM: process.env.TERM || 'xterm-256color' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  return child
+}
+
+function startPtyServer() {
+  if (!ptyEnabled) {
+    console.log('runner-agent: PTY server disabled')
+    return
+  }
+  const server = createServer((req, res) => {
+    const path = (req.url || '').split('?')[0]
+    if (path === '/orch/pty/health' || path === '/health') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' })
+      res.end('ok')
+      return
+    }
+    res.writeHead(404)
+    res.end('not found')
+  })
+
+  server.on('upgrade', (req, socket, head) => {
+    const path = (req.url || '').split('?')[0]
+    if (path !== '/orch/pty' && path !== '/orch/pty/') {
+      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    if (!authorizePtyRequest(req)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    const secKey = req.headers['sec-websocket-key']
+    if (!secKey || typeof secKey !== 'string') {
+      socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${wsAcceptKey(secKey)}\r\n` +
+        '\r\n'
+    )
+    if (head && head.length) socket.unshift(head)
+
+    const sessionId = `pty-${Date.now()}-${randomBytes(3).toString('hex')}`
+    const child = spawnShellPty()
+    let closed = false
+    const closeAll = () => {
+      if (closed) return
+      closed = true
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        /* ignore */
+      }
+      try {
+        socket.end()
+      } catch {
+        /* ignore */
+      }
+    }
+
+    child.stdout.on('data', (d) => {
+      try {
+        wsSendText(
+          socket,
+          JSON.stringify({ type: 'output', data: d.toString('utf8'), sessionId })
+        )
+      } catch {
+        closeAll()
+      }
+    })
+    child.stderr.on('data', (d) => {
+      try {
+        wsSendText(
+          socket,
+          JSON.stringify({ type: 'output', data: d.toString('utf8'), sessionId })
+        )
+      } catch {
+        closeAll()
+      }
+    })
+    child.on('exit', (code) => {
+      try {
+        wsSendText(
+          socket,
+          JSON.stringify({ type: 'exit', code: code ?? null, sessionId })
+        )
+      } catch {
+        /* ignore */
+      }
+      closeAll()
+    })
+
+    wsSendText(
+      socket,
+      JSON.stringify({
+        type: 'ready',
+        sessionId,
+        workspaceId,
+        interaction: 'pty',
+      })
+    )
+
+    attachWsReader(socket, (raw) => {
+      let msg
+      try {
+        msg = JSON.parse(raw)
+      } catch {
+        return
+      }
+      if (msg.type === 'input' && typeof msg.data === 'string') {
+        try {
+          child.stdin.write(msg.data)
+        } catch {
+          closeAll()
+        }
+        return
+      }
+      if (
+        msg.type === 'resize' &&
+        typeof msg.cols === 'number' &&
+        typeof msg.rows === 'number'
+      ) {
+        // script(1) PTY: best-effort via stty (node-pty ioctl lands with R4 image).
+        try {
+          child.stdin.write(`stty cols ${msg.cols} rows ${msg.rows}\n`)
+        } catch {
+          /* ignore */
+        }
+        return
+      }
+      if (msg.type === 'close') closeAll()
+    })
+
+    socket.on('close', closeAll)
+    socket.on('error', closeAll)
+    console.log('runner-agent: PTY session open', sessionId)
+  })
+
+  server.listen(ptyPort, '127.0.0.1', () => {
+    console.log('runner-agent: PTY WebSocket on 127.0.0.1:' + ptyPort + '/orch/pty')
+  })
+  server.on('error', (err) => {
+    console.error('runner-agent: PTY server error', err.message)
+  })
+}
+
 console.log('runner-agent: started', {
   workspaceId,
   apiUrl,
   agent,
   driveEnabled,
   runtime: runtimeBase(),
+  ptyPort: ptyEnabled ? ptyPort : null,
 })
+startPtyServer()
 await heartbeat()
 setInterval(() => {
   void heartbeat()

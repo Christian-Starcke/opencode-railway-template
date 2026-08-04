@@ -18,6 +18,8 @@ const { isSourceMode } = require("./source-mode");
 
 const PORT = process.env.PORT || "8080";
 const INTERNAL_PORT = process.env.INTERNAL_PORT || "18080";
+/** R3.1b — runner-agent interactive shell PTY (loopback; proxied at /orch/pty). */
+const PTY_PORT = process.env.ORCHESTRATOR_PTY_PORT || "19090";
 const PLUGIN_PORT = process.env.OPENCLAW_PLUGIN_PORT || "9090";
 const WORKSPACE = process.env.OPENCODE_WORKSPACE || "/data/workspace";
 const PASSWORD = process.env.OPENCODE_SERVER_PASSWORD;
@@ -1178,13 +1180,20 @@ const server = http.createServer(async (req, res) => {
     console.log(`[proxy] ${req.method} ${req.url}`);
   }
 
+  // R3.1b — health + any HTTP to the in-VM PTY server
+  if (pathname === "/orch/pty" || pathname.startsWith("/orch/pty/")) {
+    proxyRequest(req, res, PTY_PORT);
+    return;
+  }
+
   const targetPort = isPluginReq ? PLUGIN_PORT : INTERNAL_PORT;
   proxyRequest(req, res, targetPort);
 });
 
 // WebSocket upgrade handling
 server.on('upgrade', (req, socket, head) => {
-  logSleepInbound(req, pathnameOf(req.url), "upgrade");
+  const pathname = pathnameOf(req.url);
+  logSleepInbound(req, pathname, "upgrade");
 
   if (!isAuthenticated(req)) {
     socket.write(`HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="${AUTH_REALM}"\r\nConnection: close\r\n\r\n`);
@@ -1194,11 +1203,16 @@ server.on('upgrade', (req, socket, head) => {
 
   touchActivity();
 
+  const targetPort =
+    pathname === "/orch/pty" || pathname.startsWith("/orch/pty/")
+      ? PTY_PORT
+      : INTERNAL_PORT;
+
   proxyWebSocketUpgrade({
     req,
     socket,
     head,
-    targetPort: INTERNAL_PORT,
+    targetPort,
     onError: (err) => {
       console.error('[websocket error]', err.message);
     },
