@@ -298,18 +298,87 @@ if (launch.error) {
 }
 console.log(`[wrapper] Launching OpenCode via ${launch.mode}: ${launch.cmd}`);
 
-// Start headless opencode server (internal port, not publicly exposed)
-const opencode = spawn(
-  launch.cmd,
-  launch.args,
-  {
+// R3.4 — keep the wrapper alive across harness process kills.
+// Sidecar restart-harness sends SIGHUP→SIGKILL to listeners on INTERNAL_PORT;
+// we must respawn OpenCode instead of process.exit (which took down the service).
+let opencode = null;
+let receivedSigterm = false;
+let respawnTimer = null;
+let respawnAttempts = 0;
+const RESPAWN_BASE_MS = Number(process.env.OPENCODE_RESPAWN_DELAY_MS || 750);
+const RESPAWN_MAX_MS = Number(process.env.OPENCODE_RESPAWN_MAX_DELAY_MS || 15000);
+
+function attachOpencodeIo(child) {
+  child.stdout?.on("data", (data) => {
+    const lines = data.toString().split("\n");
+    for (const line of lines) {
+      if (line) classifyAndOutput(line);
+    }
+  });
+  child.stderr?.on("data", (data) => {
+    const lines = data.toString().split("\n");
+    for (const line of lines) {
+      if (line) classifyAndOutput(line);
+    }
+  });
+  child.on("error", (err) => {
+    console.error(`[wrapper] Failed to spawn opencode: ${err.message}`);
+    if (receivedSigterm) {
+      process.exit(1);
+      return;
+    }
+    scheduleOpencodeRespawn("spawn-error");
+  });
+  child.on("exit", (code, signal) => {
+    console.log(`[wrapper] opencode exited with code=${code}, signal=${signal}`);
+    if (receivedSigterm) {
+      process.exit(code ?? 0);
+      return;
+    }
+    scheduleOpencodeRespawn(`exit code=${code} signal=${signal}`);
+  });
+}
+
+function spawnOpencode(reason = "initial") {
+  console.log(`[wrapper] Spawning OpenCode (${reason}) via ${launch.mode}: ${launch.cmd}`);
+  const child = spawn(launch.cmd, launch.args, {
     cwd: WORKSPACE,
     stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
-  }
-);
+  });
+  opencode = child;
+  attachOpencodeIo(child);
+  return child;
+}
 
-let receivedSigterm = false;
+function scheduleOpencodeRespawn(reason) {
+  if (receivedSigterm) return;
+  if (respawnTimer) return;
+  const delay = Math.min(
+    RESPAWN_MAX_MS,
+    RESPAWN_BASE_MS * Math.max(1, 2 ** Math.min(respawnAttempts, 4))
+  );
+  respawnAttempts += 1;
+  console.log(
+    `[wrapper] Scheduling OpenCode respawn in ${delay}ms (attempt=${respawnAttempts}, reason=${reason})`
+  );
+  respawnTimer = setTimeout(() => {
+    respawnTimer = null;
+    try {
+      spawnOpencode(`respawn#${respawnAttempts}`);
+      // Reset backoff after a successful spawn; health may still take time.
+      setTimeout(() => {
+        if (opencode && !opencode.killed) respawnAttempts = 0;
+      }, 10000);
+    } catch (err) {
+      console.error(`[wrapper] Respawn failed: ${err.message}`);
+      scheduleOpencodeRespawn("respawn-throw");
+    }
+  }, delay);
+}
+
+// Start headless opencode server (internal port, not publicly exposed)
+spawnOpencode("boot");
 
 function shouldSuppressLog(trimmed) {
   if (debugTraffic) return false;
@@ -370,34 +439,6 @@ function classifyAndOutput(line) {
     console.log(trimmed);
   }
 }
-
-// Handle stdout
-opencode.stdout?.on("data", (data) => {
-  const lines = data.toString().split("\n");
-  for (const line of lines) {
-    if (line) classifyAndOutput(line);
-  }
-});
-
-// Handle stderr
-opencode.stderr?.on("data", (data) => {
-  const lines = data.toString().split("\n");
-  for (const line of lines) {
-    if (line) classifyAndOutput(line);
-  }
-});
-
-// Error handling
-opencode.on("error", (err) => {
-  console.error(`[wrapper] Failed to spawn opencode: ${err.message}`);
-  process.exit(1);
-});
-
-// Process exit handling
-opencode.on("exit", (code, signal) => {
-  console.log(`[wrapper] opencode exited with code=${code}, signal=${signal}`);
-  process.exit(code ?? 0);
-});
 
 // Wait for OpenCode startup
 async function waitForOpencode(timeoutMs = Number(process.env.OPENCODE_START_TIMEOUT_MS || 30000)) {
@@ -1305,8 +1346,13 @@ function gracefulShutdown(signal) {
     console.log("[wrapper] Proxy server closed");
   });
 
+  if (respawnTimer) {
+    clearTimeout(respawnTimer);
+    respawnTimer = null;
+  }
+
   // Send SIGTERM to child process
-  if (opencode.pid) {
+  if (opencode?.pid) {
     try {
       opencode.kill("SIGTERM");
       console.log("[wrapper] Sent SIGTERM to opencode");

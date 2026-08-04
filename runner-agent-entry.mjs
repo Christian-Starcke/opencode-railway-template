@@ -13,7 +13,13 @@ import {
   timingSafeEqual as cryptoTimingSafeEqual,
 } from 'node:crypto'
 import { createServer } from 'node:http'
-import { spawn } from 'node:child_process'
+import { spawn, execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
+const SCRIPT_STOP_GRACE_MS = Number(
+  process.env.ORCHESTRATOR_SCRIPT_STOP_GRACE_MS || 200
+)
 
 const apiUrl = (process.env.ORCHESTRATOR_API_URL || '').replace(/\/$/, '')
 const token = process.env.ORCHESTRATOR_RUNNER_TOKEN || ''
@@ -37,15 +43,173 @@ const headers = {
 
 /** @type {Set<string>} */
 const inFlight = new Set()
+/** @type {Map<string, AbortController>} */
+const turnAborts = new Map()
 /** @type {string | null} */
 let cachedSessionId = process.env.ORCHESTRATOR_OPENCODE_SESSION_ID || null
+/** @type {boolean} */
+let restartInFlight = false
+
+function internalPort() {
+  return Number(
+    process.env.INTERNAL_PORT || process.env.OPENCODE_INTERNAL_PORT || 18080
+  )
+}
 
 function runtimeBase() {
   const explicit = (process.env.RUNTIME_URL || '').replace(/\/$/, '')
   if (explicit) return explicit
   // opencode-railway-template: public PORT is the wrapper; OpenCode is on INTERNAL_PORT.
-  const port = process.env.INTERNAL_PORT || process.env.OPENCODE_INTERNAL_PORT || '18080'
-  return `http://127.0.0.1:${port}`
+  return `http://127.0.0.1:${internalPort()}`
+}
+
+function parseListeningPids(output) {
+  const pids = new Set()
+  for (const match of String(output || '').matchAll(/pid=(\d+)/gi)) {
+    const n = Number(match[1])
+    if (Number.isInteger(n) && n > 0) pids.add(n)
+  }
+  for (const match of String(output || '').matchAll(/(?:^|\s)(\d+)\/\S+/g)) {
+    const n = Number(match[1])
+    if (Number.isInteger(n) && n > 0) pids.add(n)
+  }
+  return [...pids]
+}
+
+async function findListeningPids(port) {
+  const attempts = [
+    { cmd: 'ss', args: ['-lptn', `sport = :${port}`] },
+    { cmd: 'lsof', args: ['-ti', `TCP:${port}`, '-sTCP:LISTEN'] },
+    { cmd: 'fuser', args: [`${port}/tcp`] },
+  ]
+  for (const attempt of attempts) {
+    try {
+      const { stdout, stderr } = await execFileAsync(attempt.cmd, attempt.args, {
+        timeout: 5000,
+      })
+      const text = `${stdout || ''}\n${stderr || ''}`
+      if (attempt.cmd === 'lsof') {
+        const bare = text
+          .split(/\s+/)
+          .map((s) => Number(s.trim()))
+          .filter((n) => Number.isInteger(n) && n > 0)
+        if (bare.length) return [...new Set(bare)]
+      }
+      const parsed = parseListeningPids(text)
+      if (parsed.length) return parsed
+    } catch {
+      /* try next */
+    }
+  }
+  return []
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function stopPid(pid, graceMs = SCRIPT_STOP_GRACE_MS) {
+  if (!pidAlive(pid)) return false
+  try {
+    process.kill(pid, 'SIGHUP')
+  } catch {
+    /* ignore */
+  }
+  await new Promise((r) => setTimeout(r, graceMs))
+  if (!pidAlive(pid)) return true
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    /* ignore */
+  }
+  await new Promise((r) => setTimeout(r, 50))
+  return !pidAlive(pid)
+}
+
+async function waitHealth(base, auth, expectAlive, maxMs) {
+  const started = Date.now()
+  while (Date.now() - started < maxMs) {
+    let alive = false
+    try {
+      const res = await fetch(`${base}/global/health`, {
+        headers: auth ? { Authorization: auth } : {},
+        signal: AbortSignal.timeout(4000),
+      })
+      alive = res.ok
+    } catch {
+      alive = false
+    }
+    if (alive === expectAlive) return true
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  return false
+}
+
+async function probeHarnessAlive() {
+  const base = runtimeBase()
+  const auth = openCodeAuthHeader()
+  try {
+    const res = await fetch(`${base}/global/health`, {
+      headers: auth ? { Authorization: auth } : {},
+      signal: AbortSignal.timeout(4000),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** R3.4 — kill listeners on INTERNAL_PORT; wrapper must respawn OpenCode. */
+async function restartHarnessProcess() {
+  const port = internalPort()
+  const base = runtimeBase()
+  const auth = openCodeAuthHeader()
+  const pidBefore = await findListeningPids(port)
+  console.log('runner-agent: restart_harness kill', { port, pidBefore })
+  for (const pid of pidBefore) {
+    await stopPid(pid)
+  }
+  // Clear cached session — OpenCode process restart drops in-memory state.
+  cachedSessionId = null
+  const down = await waitHealth(base, auth, false, 15000)
+  const up = await waitHealth(base, auth, true, 90000)
+  const pidAfter = await findListeningPids(port)
+  const pidChanged =
+    pidAfter.length > 0 && pidAfter.some((p) => !pidBefore.includes(p))
+  const ok = up && (pidChanged || pidBefore.length === 0 || down)
+  return {
+    ok,
+    pidBefore,
+    pidAfter,
+    downObserved: down,
+    error: ok
+      ? undefined
+      : !up
+        ? 'harness health did not recover after kill'
+        : 'kill did not displace harness listeners',
+  }
+}
+
+async function ackRestartHarness(result, detail) {
+  const res = await fetch(`${apiUrl}/api/runner/control`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      workspaceId,
+      action: 'restart_harness',
+      result,
+      harnessAlive: result === 'done',
+      detail,
+    }),
+  })
+  if (!res.ok) {
+    console.warn('runner-agent: restart ack', res.status, await res.text())
+  }
 }
 
 function openCodeAuthHeader() {
@@ -172,15 +336,14 @@ function mintMessageId() {
 }
 
 async function heartbeat() {
+  const harnessAlive = await probeHarnessAlive()
   const res = await fetch(`${apiUrl}/api/runner/control`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
       workspaceId,
       action: 'heartbeat',
-      harnessAlive: Boolean(
-        process.env.RUNTIME_URL || process.env.OPENCODE_SERVER_PASSWORD
-      ),
+      harnessAlive,
     }),
   })
   if (!res.ok) {
@@ -258,6 +421,12 @@ async function driveOpenCodeTurn(pending) {
   }
 
   inFlight.add(attemptId)
+  const abort = new AbortController()
+  turnAborts.set(attemptId, abort)
+  const turnTimeoutMs = Number(
+    process.env.ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS || 240000
+  )
+  const timeout = setTimeout(() => abort.abort(), turnTimeoutMs)
   const messageId =
     (typeof pending.messageId === 'string' && pending.messageId.trim()) ||
     mintMessageId()
@@ -322,9 +491,7 @@ async function driveOpenCodeTurn(pending) {
                 },
               }),
         }),
-        signal: AbortSignal.timeout(
-          Number(process.env.ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS || 240000)
-        ),
+        signal: abort.signal,
       }
     )
     // OpenCode can return HTTP 200 with an empty body when `agent` resolution
@@ -390,15 +557,22 @@ async function driveOpenCodeTurn(pending) {
       `${content.length} chars`
     )
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+    const aborted =
+      (err && typeof err === 'object' && err.name === 'AbortError') ||
+      (err instanceof Error && /abort/i.test(err.message))
+    const msg = aborted
+      ? 'cancelled'
+      : err instanceof Error
+        ? err.message
+        : String(err)
     console.error('runner-agent: turn failed', attemptId, msg)
     try {
       await pushIngest({
         agent: 'opencode',
         messageId,
         attemptId,
-        content: msg,
-        status: 'error',
+        content: aborted ? 'Turn cancelled' : msg,
+        status: aborted ? 'cancelled' : 'error',
         writeSeq: ++writeSeq,
         durationMs: Math.max(0, Date.now() - started),
       })
@@ -406,6 +580,8 @@ async function driveOpenCodeTurn(pending) {
       console.error('runner-agent: error ingest failed', ingestErr)
     }
   } finally {
+    clearTimeout(timeout)
+    turnAborts.delete(attemptId)
     inFlight.delete(attemptId)
   }
 }
@@ -420,6 +596,41 @@ async function pollPending() {
     return
   }
   const json = await res.json()
+
+  // R3.4 — cancel reaches the process: abort in-flight when attempt cleared / cancelled
+  if (json.pending?.attemptId && json.pending.assistantStatus === 'cancelled') {
+    const ac = turnAborts.get(json.pending.attemptId)
+    if (ac) ac.abort()
+  }
+  for (const [attemptId, ac] of turnAborts) {
+    if (!json.pending || json.pending.attemptId !== attemptId) {
+      // Attempt cleared from thread (CP cancel) while we were driving it.
+      if (inFlight.has(attemptId)) ac.abort()
+    }
+  }
+
+  // R3.4 — restart-harness queue (kill/respawn harness process, not Railway redeploy)
+  if (json.control?.restartHarness && !restartInFlight) {
+    restartInFlight = true
+    try {
+      // Abort any in-flight turn before killing the harness.
+      for (const ac of turnAborts.values()) ac.abort()
+      const detail = await restartHarnessProcess()
+      await ackRestartHarness(detail.ok ? 'done' : 'error', detail)
+      console.log(
+        'runner-agent: restart_harness',
+        detail.ok ? 'done' : 'error',
+        detail
+      )
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await ackRestartHarness('error', { error: msg })
+      console.error('runner-agent: restart_harness failed', msg)
+    } finally {
+      restartInFlight = false
+    }
+  }
+
   if (!json.pending) return
 
   if (agent === 'opencode' && driveEnabled) {
