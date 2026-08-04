@@ -15,10 +15,18 @@ import {
 import { createServer } from 'node:http'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
 
 const execFileAsync = promisify(execFile)
 const SCRIPT_STOP_GRACE_MS = Number(
   process.env.ORCHESTRATOR_SCRIPT_STOP_GRACE_MS || 200
+)
+const SETUP_TIMEOUT_MS = Number(
+  process.env.ORCHESTRATOR_SETUP_TIMEOUT_MS || 15 * 60 * 1000
+)
+const ARCHIVE_TIMEOUT_MS = Number(
+  process.env.ORCHESTRATOR_ARCHIVE_TIMEOUT_MS || 5 * 60 * 1000
 )
 
 const apiUrl = (process.env.ORCHESTRATOR_API_URL || '').replace(/\/$/, '')
@@ -49,6 +57,212 @@ const turnAborts = new Map()
 let cachedSessionId = process.env.ORCHESTRATOR_OPENCODE_SESSION_ID || null
 /** @type {boolean} */
 let restartInFlight = false
+/** @type {boolean} */
+let archiveInFlight = false
+
+function workspaceCwd() {
+  return (
+    process.env.ORCHESTRATOR_WORKSPACE_PATH ||
+    process.env.ORCHESTRATOR_CHECKOUT_PATH ||
+    '/data/workspace'
+  )
+}
+
+/** Env for setup/archive — omit SESSION_ID (agent-only, CC-208). */
+function scriptChildEnv() {
+  const env = { ...process.env }
+  delete env.ORCHESTRATOR_SESSION_ID
+  return env
+}
+
+/**
+ * @param {'setup' | 'run' | 'archive'} action
+ * @returns {Promise<{ cwd: string, argv: string[] } | null>}
+ */
+async function loadOrchestratorArgv(action) {
+  const cwd = workspaceCwd()
+  const file = path.join(cwd, '.orchestrator.json')
+  let raw
+  try {
+    raw = JSON.parse(await fs.readFile(file, 'utf8'))
+  } catch {
+    return null
+  }
+  const argv = raw?.[action]
+  if (
+    !Array.isArray(argv) ||
+    argv.length === 0 ||
+    !argv.every((p) => typeof p === 'string' && p.trim())
+  ) {
+    return null
+  }
+  return { cwd, argv: argv.map((p) => String(p)) }
+}
+
+/**
+ * CC-301 / CC-304 / CC-309 — run argv from workspace cwd; SIGHUP→SIGKILL on abort.
+ * @param {{ cwd: string, argv: string[], timeoutMs?: number }} opts
+ */
+function runWorkspaceArgv(opts) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(opts.argv[0], opts.argv.slice(1), {
+      cwd: opts.cwd,
+      env: scriptChildEnv(),
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.on('data', (d) => {
+      stdout += d.toString('utf8')
+    })
+    child.stderr?.on('data', (d) => {
+      stderr += d.toString('utf8')
+    })
+    let settled = false
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGHUP')
+      } catch {
+        /* ignore */
+      }
+      setTimeout(() => {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          /* ignore */
+        }
+      }, SCRIPT_STOP_GRACE_MS)
+      finish({
+        code: null,
+        signal: 'SIGKILL',
+        stdout,
+        stderr: stderr + '\n(timeout)',
+        timedOut: true,
+      })
+    }, opts.timeoutMs ?? SETUP_TIMEOUT_MS)
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      if (!settled) {
+        settled = true
+        reject(err)
+      }
+    })
+    child.on('close', (code, signal) => {
+      finish({ code, signal, stdout, stderr, timedOut: false })
+    })
+  })
+}
+
+/** CC-301 — once per checkout (stamp under .orch/). */
+async function runSetupOnBoot() {
+  const cwd = workspaceCwd()
+  const stamp = path.join(cwd, '.orch', 'setup-ran')
+  try {
+    await fs.access(stamp)
+    console.log('runner-agent: SETUP_SKIP already-ran')
+    return { skipped: true, reason: 'already-ran' }
+  } catch {
+    /* first boot */
+  }
+  const cfg = await loadOrchestratorArgv('setup')
+  if (!cfg) {
+    try {
+      await fs.mkdir(path.dirname(stamp), { recursive: true })
+      await fs.writeFile(stamp, 'skip-no-config\n', 'utf8')
+    } catch {
+      /* ignore */
+    }
+    console.log('runner-agent: SETUP_SKIP no-config')
+    return { skipped: true, reason: 'no-config' }
+  }
+  console.log('runner-agent: SETUP_START', cfg.argv.join(' '))
+  try {
+    const result = await runWorkspaceArgv({
+      cwd: cfg.cwd,
+      argv: cfg.argv,
+      timeoutMs: SETUP_TIMEOUT_MS,
+    })
+    await fs.mkdir(path.dirname(stamp), { recursive: true })
+    await fs.writeFile(
+      stamp,
+      `ok code=${result.code} timedOut=${result.timedOut}\n`,
+      'utf8'
+    )
+    if (result.code === 0 && !result.timedOut) {
+      try {
+        await fs.writeFile(
+          path.join(cfg.cwd, '.orch-r3-setup-ok'),
+          'R3_SETUP_OK\n',
+          'utf8'
+        )
+      } catch {
+        /* ignore */
+      }
+      console.log('runner-agent: SETUP_OK')
+      return { skipped: false, ok: true, code: result.code }
+    }
+    console.error(
+      'runner-agent: SETUP_FAIL',
+      result.code,
+      result.stderr?.slice(0, 400)
+    )
+    return { skipped: false, ok: false, code: result.code }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('runner-agent: SETUP_FAIL', msg)
+    return { skipped: false, ok: false, error: msg }
+  }
+}
+
+async function ackArchive(result, detail) {
+  const res = await fetch(`${apiUrl}/api/runner/control`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      workspaceId,
+      action: 'run_archive',
+      result,
+      detail: detail ?? {},
+    }),
+  })
+  if (!res.ok) {
+    console.warn('runner-agent: archive ack', res.status, await res.text())
+  }
+}
+
+/** CC-305 — run archive argv from checkout when CP queues control.runArchive. */
+async function runArchiveScript() {
+  const cfg = await loadOrchestratorArgv('archive')
+  if (!cfg) {
+    console.log('runner-agent: ARCHIVE_SKIP no-config')
+    return { ok: true, skipped: true }
+  }
+  console.log('runner-agent: ARCHIVE_START', cfg.argv.join(' '))
+  const result = await runWorkspaceArgv({
+    cwd: cfg.cwd,
+    argv: cfg.argv,
+    timeoutMs: ARCHIVE_TIMEOUT_MS,
+  })
+  const ok = result.code === 0 && !result.timedOut
+  console.log(ok ? 'runner-agent: ARCHIVE_OK' : 'runner-agent: ARCHIVE_FAIL', {
+    code: result.code,
+    timedOut: result.timedOut,
+  })
+  return {
+    ok,
+    skipped: false,
+    code: result.code,
+    timedOut: result.timedOut,
+    stderr: (result.stderr || '').slice(0, 500),
+  }
+}
 
 function internalPort() {
   return Number(
@@ -723,6 +937,21 @@ async function pollPending() {
     }
   }
 
+  // R3.1 / CC-305 — archive script queue (teardown fold; not CP harness shell)
+  if (json.control?.runArchive && !archiveInFlight) {
+    archiveInFlight = true
+    try {
+      const detail = await runArchiveScript()
+      await ackArchive(detail.ok ? 'done' : 'error', detail)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await ackArchive('error', { error: msg })
+      console.error('runner-agent: run_archive failed', msg)
+    } finally {
+      archiveInFlight = false
+    }
+  }
+
   if (!json.pending) return
 
   if (agent === 'opencode' && driveEnabled) {
@@ -1011,9 +1240,12 @@ console.log('runner-agent: started', {
   agent,
   driveEnabled,
   runtime: runtimeBase(),
+  cwd: workspaceCwd(),
   ptyPort: ptyEnabled ? ptyPort : null,
 })
 startPtyServer()
+// CC-301 — after checkout is present; before turns.
+await runSetupOnBoot()
 await heartbeat()
 setInterval(() => {
   void heartbeat()
