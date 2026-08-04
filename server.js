@@ -377,6 +377,44 @@ function scheduleOpencodeRespawn(reason) {
   }, delay);
 }
 
+/** R3.4 — sidecar asks wrapper to kill/respawn the harness child (not Railway redeploy). */
+function restartOpencodeChild(reason = "orch-restart-harness") {
+  if (receivedSigterm) {
+    return { ok: false, error: "wrapper shutting down" };
+  }
+  const child = opencode;
+  const pid = child?.pid || null;
+  if (!child || !pid) {
+    scheduleOpencodeRespawn(reason);
+    return { ok: true, pid: null, action: "respawn-scheduled" };
+  }
+  const graceMs = Number(process.env.OPENCODE_RESTART_GRACE_MS || 200);
+  try {
+    child.kill("SIGHUP");
+    console.log(`[wrapper] restart-harness SIGHUP pid=${pid} reason=${reason}`);
+  } catch (err) {
+    console.error(`[wrapper] restart-harness SIGHUP failed: ${err.message}`);
+  }
+  setTimeout(() => {
+    try {
+      if (opencode === child && child.exitCode == null) {
+        child.kill("SIGKILL");
+        console.log(`[wrapper] restart-harness SIGKILL pid=${pid}`);
+      }
+    } catch {
+      /* already gone */
+    }
+  }, graceMs);
+  // exit handler schedules respawn unless shutting down
+  return { ok: true, pid, action: "signaled" };
+}
+
+function isLocalSocket(req) {
+  const raw = String(req.socket?.remoteAddress || "");
+  const a = raw.replace(/^::ffff:/, "").toLowerCase();
+  return a === "127.0.0.1" || a === "::1" || a === "localhost";
+}
+
 // Start headless opencode server (internal port, not publicly exposed)
 spawnOpencode("boot");
 
@@ -1137,6 +1175,19 @@ const server = http.createServer(async (req, res) => {
 
   if (shouldLogSleepInbound(req, pathname, isPluginReq)) {
     logSleepInbound(req, pathname);
+  }
+
+  // R3.4 — loopback-only; runner-agent kill/respawn without Basic Auth.
+  if (pathname === "/orch/restart-harness" && req.method === "POST") {
+    if (!isLocalSocket(req)) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "loopback only" }));
+      return;
+    }
+    const result = restartOpencodeChild("orch-restart-harness");
+    res.writeHead(result.ok ? 200 : 503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(result));
+    return;
   }
 
   if (pathname === "/login" && (req.method === "GET" || req.method === "HEAD")) {

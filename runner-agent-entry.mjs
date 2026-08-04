@@ -76,6 +76,54 @@ function parseListeningPids(output) {
   return [...pids]
 }
 
+/** Linux /proc fallback when ss/lsof/fuser are missing from the image. */
+async function findListeningPidsViaProc(port) {
+  const portNum = Number(port)
+  if (!Number.isInteger(portNum) || portNum <= 0) return []
+  try {
+    const fs = await import('node:fs/promises')
+    const hexPort = portNum.toString(16).toUpperCase().padStart(4, '0')
+    const tcp = await fs.readFile('/proc/net/tcp', 'utf8').catch(() => '')
+    const tcp6 = await fs.readFile('/proc/net/tcp6', 'utf8').catch(() => '')
+    const inodes = new Set()
+    for (const line of `${tcp}\n${tcp6}`.split('\n').slice(1)) {
+      const cols = line.trim().split(/\s+/)
+      if (cols.length < 10) continue
+      const local = cols[1] || ''
+      const state = cols[3]
+      const inode = cols[9]
+      // 0A = LISTEN
+      if (state !== '0A') continue
+      if (!local.toUpperCase().endsWith(`:${hexPort}`)) continue
+      if (inode && inode !== '0') inodes.add(inode)
+    }
+    if (!inodes.size) return []
+    const pids = new Set()
+    const procDirs = await fs.readdir('/proc')
+    for (const ent of procDirs) {
+      if (!/^\d+$/.test(ent)) continue
+      let fds
+      try {
+        fds = await fs.readdir(`/proc/${ent}/fd`)
+      } catch {
+        continue
+      }
+      for (const fd of fds) {
+        try {
+          const link = await fs.readlink(`/proc/${ent}/fd/${fd}`)
+          const m = /^socket:\[(\d+)\]$/.exec(link)
+          if (m && inodes.has(m[1])) pids.add(Number(ent))
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return [...pids]
+  } catch {
+    return []
+  }
+}
+
 async function findListeningPids(port) {
   const attempts = [
     { cmd: 'ss', args: ['-lptn', `sport = :${port}`] },
@@ -101,7 +149,7 @@ async function findListeningPids(port) {
       /* try next */
     }
   }
-  return []
+  return findListeningPidsViaProc(port)
 }
 
 function pidAlive(pid) {
@@ -164,29 +212,75 @@ async function probeHarnessAlive() {
   }
 }
 
-/** R3.4 — kill listeners on INTERNAL_PORT; wrapper must respawn OpenCode. */
+/** Prefer wrapper loopback restart (tracks the child); fall back to PID kill. */
+async function requestWrapperRestart() {
+  const port = Number(process.env.PORT || 8080)
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/orch/restart-harness`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(8000),
+    })
+    const text = await res.text().catch(() => '')
+    let json = null
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
+    return {
+      ok: res.ok && json?.ok !== false,
+      status: res.status,
+      detail: json,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      detail: {
+        error: err instanceof Error ? err.message : String(err),
+      },
+    }
+  }
+}
+
+/** R3.4 — kill harness process; wrapper must respawn OpenCode (not service exit). */
 async function restartHarnessProcess() {
   const port = internalPort()
   const base = runtimeBase()
   const auth = openCodeAuthHeader()
   const pidBefore = await findListeningPids(port)
-  console.log('runner-agent: restart_harness kill', { port, pidBefore })
-  for (const pid of pidBefore) {
-    await stopPid(pid)
+  const wrapper = await requestWrapperRestart()
+  console.log('runner-agent: restart_harness', {
+    port,
+    pidBefore,
+    wrapperOk: wrapper.ok,
+    wrapperStatus: wrapper.status,
+    wrapperDetail: wrapper.detail,
+  })
+  if (!wrapper.ok) {
+    for (const pid of pidBefore) {
+      await stopPid(pid)
+    }
   }
   // Clear cached session — OpenCode process restart drops in-memory state.
   cachedSessionId = null
-  const down = await waitHealth(base, auth, false, 15000)
+  const down = await waitHealth(base, auth, false, 20000)
   const up = await waitHealth(base, auth, true, 90000)
   const pidAfter = await findListeningPids(port)
   const pidChanged =
-    pidAfter.length > 0 && pidAfter.some((p) => !pidBefore.includes(p))
-  const ok = up && (pidChanged || pidBefore.length === 0 || down)
+    pidAfter.length > 0 &&
+    (pidBefore.length === 0
+      ? true
+      : pidAfter.some((p) => !pidBefore.includes(p)))
+  // Require a real kill signal: health went down, or PIDs changed, or wrapper
+  // acknowledged a signal. Empty pidBefore alone is NOT success (image may lack ss).
+  const ok = up && (down || pidChanged || wrapper.ok)
   return {
     ok,
     pidBefore,
     pidAfter,
     downObserved: down,
+    wrapper,
     error: ok
       ? undefined
       : !up
@@ -206,6 +300,7 @@ async function ackRestartHarness(result, detail) {
       harnessAlive: result === 'done',
       detail,
     }),
+    signal: AbortSignal.timeout(20000),
   })
   if (!res.ok) {
     console.warn('runner-agent: restart ack', res.status, await res.text())
@@ -926,6 +1021,12 @@ await heartbeat()
 setInterval(() => {
   void heartbeat()
 }, heartbeatMs)
+/** Serialize polls so restart_harness / turns do not overlap. */
+let pollBusy = false
 setInterval(() => {
-  void pollPending()
+  if (pollBusy) return
+  pollBusy = true
+  void pollPending().finally(() => {
+    pollBusy = false
+  })
 }, pollMs)

@@ -16,6 +16,7 @@ RUN apt-get update \
     gh \
     git \
     procps \
+    iproute2 \
   && rm -rf /var/lib/apt/lists/*
 
 RUN if [ "${SOURCE_MODE}" = "false" ]; then \
