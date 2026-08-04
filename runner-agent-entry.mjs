@@ -76,10 +76,11 @@ function parseListeningPids(output) {
   return [...pids]
 }
 
-/** Linux /proc fallback when ss/lsof/fuser are missing from the image. */
-async function findListeningPidsViaProc(port) {
+/** Linux /proc fallback when ss/lsof/fuser are missing. Hard-capped (can be slow). */
+async function findListeningPidsViaProc(port, budgetMs = 1500) {
   const portNum = Number(port)
   if (!Number.isInteger(portNum) || portNum <= 0) return []
+  const started = Date.now()
   try {
     const fs = await import('node:fs/promises')
     const hexPort = portNum.toString(16).toUpperCase().padStart(4, '0')
@@ -101,6 +102,7 @@ async function findListeningPidsViaProc(port) {
     const pids = new Set()
     const procDirs = await fs.readdir('/proc')
     for (const ent of procDirs) {
+      if (Date.now() - started > budgetMs) break
       if (!/^\d+$/.test(ent)) continue
       let fds
       try {
@@ -117,6 +119,7 @@ async function findListeningPidsViaProc(port) {
           /* ignore */
         }
       }
+      if (pids.size) return [...pids]
     }
     return [...pids]
   } catch {
@@ -248,16 +251,18 @@ async function restartHarnessProcess() {
   const port = internalPort()
   const base = runtimeBase()
   const auth = openCodeAuthHeader()
-  const pidBefore = await findListeningPids(port)
+  // Wrapper first — owns the child PID; avoid slow /proc scans on the hot path.
   const wrapper = await requestWrapperRestart()
-  console.log('runner-agent: restart_harness', {
+  console.log('runner-agent: restart_harness wrapper', {
     port,
-    pidBefore,
     wrapperOk: wrapper.ok,
     wrapperStatus: wrapper.status,
     wrapperDetail: wrapper.detail,
   })
+  let pidBefore = []
   if (!wrapper.ok) {
+    pidBefore = await findListeningPids(port)
+    console.log('runner-agent: restart_harness pid fallback', { pidBefore })
     for (const pid of pidBefore) {
       await stopPid(pid)
     }
@@ -266,19 +271,11 @@ async function restartHarnessProcess() {
   cachedSessionId = null
   const down = await waitHealth(base, auth, false, 20000)
   const up = await waitHealth(base, auth, true, 90000)
-  const pidAfter = await findListeningPids(port)
-  const pidChanged =
-    pidAfter.length > 0 &&
-    (pidBefore.length === 0
-      ? true
-      : pidAfter.some((p) => !pidBefore.includes(p)))
-  // Require a real kill signal: health went down, or PIDs changed, or wrapper
-  // acknowledged a signal. Empty pidBefore alone is NOT success (image may lack ss).
-  const ok = up && (down || pidChanged || wrapper.ok)
+  // Evidence: health flap, or wrapper accepted the signal.
+  const ok = up && (down || wrapper.ok)
   return {
     ok,
     pidBefore,
-    pidAfter,
     downObserved: down,
     wrapper,
     error: ok
